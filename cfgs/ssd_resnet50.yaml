@@ -1,0 +1,17 @@
+network: resnet
+num_layers: 50
+
+roidb_cache_path: './dataset/cache/coco_roidb.pkl'
+target_shape: [300, 300]
+num_classes: 80
+
+batch_size: 16
+gpus: 0,1,2,3
+lr: 0.002
+wd: 0.0005
+momentum: 0.9
+freeze_params: true
+
+epoch: 10
+
+save_prefix: './output/ssd_resnet50_coco/ssd_resnet50_coco_300x300'
