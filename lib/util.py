@@ -24,7 +24,7 @@ def get_scales(min_scale=0.2, max_scale=0.9, num_layers=6):
         scales.append([min_sizes[layer_idx], np.single(np.sqrt(min_sizes[layer_idx] * max_sizes[layer_idx]))])
     return scales
 
-def get_logger(log_path):
+def build_logger(log_path):
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
@@ -39,4 +39,3 @@ def get_logger(log_path):
     sh.setFormatter(formater)
     logger.addHandler(sh)
 
-    return logger

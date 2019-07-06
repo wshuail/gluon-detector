@@ -24,4 +24,4 @@ network: 'mobilenet1.0'
 layers: ['relu22_fwd', 'relu26_fwd']
 num_filters: [512, 512, 256, 256]
 
-save_prefix: '/world/data-gpu-107/wangshuailong/experiments/tmp/ssd'
+save_prefix: '~/gluon_detector/output'

@@ -17,8 +17,7 @@ from nvidia.dali.plugin.mxnet import DALIGenericIterator
 sys.path.insert(0, os.path.expanduser('~/ssd'))
 from lib.loss import SSDMultiBoxLoss
 from lib.metrics.coco_detection import COCODetectionMetric
-from lib.util import get_scales
-from lib.util import get_logger
+from lib.util import build_logger
 from lib.ssd import SSD
 from lib.anchor import get_anchors
 from lib.data.mscoco.detection import DALICOCODetection
@@ -42,8 +41,13 @@ def get_dataset(config, ctx):
     val_split = config['val_split']
     val_dataset = [DALICOCODetection(val_split, num_devices, shard_id) for shard_id in range(num_devices)] 
     
+    log_file = '{}_{}_{}_{}x{}_eval'.format(config['model'], config['dataset'], config['network'],
+                                            config['input_shape'][0], config['input_shape'][1]) 
+    log_path = os.path.expanduser(os.path.join(save_prefix, log_file))
+    
     val_metric = COCODetectionMetric(dataset=val_split,
-                                     save_prefix=config['save_prefix'] + '_eval',
+                                     save_prefix=log_path,
+                                     use_time=False,
                                      cleanup=True,
                                      data_shape=config['input_shape'])
     return train_dataset, val_dataset, val_metric
@@ -143,8 +147,6 @@ def train(net, train_data, val_data, eval_metric, ctx, config):
         btic = time.time()
         net.hybridize(static_alloc=True, static_shape=True)
         for i, batch in enumerate(train_data):
-            if i >= 1000:
-                break
             
             data = [d.data[0] for d in batch]
             box_targets = [d.label[0] for d in batch]
@@ -172,13 +174,13 @@ def train(net, train_data, val_data, eval_metric, ctx, config):
             if i > 0 and i % 50 == 0:
                 name1, loss1 = ce_metric.get()
                 name2, loss2 = smoothl1_metric.get()
-                print ('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.3f}, {}={:.3f}'.\
+                logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.3f}, {}={:.3f}'.\
                        format(epoch, i, batch_size/(time.time()-btic), name1, loss1, name2, loss2))
         
             btic = time.time()
         map_name, mean_ap = validate(net, val_data, ctx, eval_metric, config)
         val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
-        print('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
+        logging.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
 
 
 
@@ -206,7 +208,14 @@ if __name__ == '__main__':
     args = parse_args()
     with open(args.cfg, 'r') as f:
         config = yaml.full_load(f)
-    print (config)
+
+    save_prefix = config['save_prefix']
+    log_file = '{}_{}_{}_{}x{}_train.log'.format(config['model'], config['dataset'], config['network'],
+                                                 config['input_shape'][0], config['input_shape'][1]) 
+    log_path = os.path.expanduser(os.path.join(save_prefix, log_file))
+    build_logger(log_path)
+    
+    logging.info(config)
     
     if config['amp']:
         amp.init()
