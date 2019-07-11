@@ -189,6 +189,7 @@ class COCODetectionMetric(mx.metric.EvalMetric):
                 a = a.asnumpy()
             return a
 
+
         for pred_bbox, pred_label, pred_score, img_id in zip(
                 *[as_numpy(x) for x in [pred_bboxes, pred_labels, pred_scores, img_ids]]):
 

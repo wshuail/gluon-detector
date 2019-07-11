@@ -56,4 +56,8 @@ def expand_network(network, layers, num_filters, min_num_filter=128):
 
     return output_blocks
 
+def centernet_extractor(network, layers):
+    output_layers, inputs, params = parse_network(network, layers)
+    output_blocks = SymbolBlock(outputs=output_layers, inputs=inputs, params=params)
+    return output_blocks
 

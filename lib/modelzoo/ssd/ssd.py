@@ -2,9 +2,9 @@ import mxnet as mx
 from mxnet import nd
 from mxnet import autograd
 from mxnet.gluon import nn
-from .feature import expand_network
-from .target import BoxDecoder, MultiPerClassDecoder
-from .target import SSDAnchorGenerator
+from ..feature import expand_network
+from ..target import BoxDecoder, MultiPerClassDecoder
+from ..target import SSDAnchorGenerator
 
 
 class SSD(nn.HybridBlock):
@@ -80,7 +80,7 @@ class SSD(nn.HybridBlock):
             cls_result = F.concat(*[cls_id, score, bboxes], dim=-1)  # (B, N, 6)
             result.append(cls_result)
         result = F.concat(*result, dim=1)
-        
+       
         if self.nms_thresh > 0 and self.nms_thresh < 1:
             result = F.contrib.box_nms(
                 result, overlap_thresh=self.nms_thresh, topk=self.nms_topk, valid_thresh=0.01,

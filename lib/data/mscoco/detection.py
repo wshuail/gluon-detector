@@ -234,7 +234,7 @@ class SSDValPipeline(Pipeline):
         return (images, bboxes.gpu(), labels.gpu(), img_ids.gpu())
 
 
-class ValLoader(object):
+class SSDValLoader(object):
     def __init__(self, pipelines, size, batch_size, data_shape=None):
         self.pipelines = pipelines
         self.size = size
