@@ -239,6 +239,7 @@ class SSDAnchorGenerator(nn.HybridBlock):
     def __init__(self, index, sizes, ratios, step, alloc_size, offsets=(0.5, 0.5), **kwargs):
         super(SSDAnchorGenerator, self).__init__(**kwargs)
 
+        sizes = (sizes[0], np.sqrt(sizes[0] * sizes[1]))
         anchors = self.generate_feat_anchors(sizes, ratios, step, alloc_size, offsets)
         self.anchors = self.params.get_constant('anchors_{}'.format(index), anchors)
 

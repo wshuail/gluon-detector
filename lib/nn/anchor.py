@@ -3,6 +3,28 @@ from mxnet import nd
 from mxnet import autograd
 
 
+def get_scales(min_scale=0.2, max_scale=0.9, num_layers=6):
+    # this code follows the original implementation of wei liu
+    # for more, look at ssd/score_ssd_pascal.py:310 in the original caffe implementation
+    min_ratio = int(min_scale * 100)
+    max_ratio = int(max_scale * 100)
+    step = int(np.floor((max_ratio - min_ratio) / (num_layers - 2)))
+    
+    min_sizes = []
+    max_sizes = []
+    for ratio in range(min_ratio, max_ratio + 1, step):
+        min_sizes.append(ratio / 100.)
+        max_sizes.append((ratio + step) / 100.)
+    min_sizes = [int(100*min_scale / 2.0) / 100.0] + min_sizes
+    max_sizes = [min_scale] + max_sizes
+    
+    # convert it back to this implementation's notation:
+    scales = []
+    for layer_idx in range(num_layers):
+        scales.append([min_sizes[layer_idx], np.single(np.sqrt(min_sizes[layer_idx] * max_sizes[layer_idx]))])
+    return scales
+
+
 def get_anchors(net, input_shape):
     h, w = input_shape
     x = nd.random.uniform(0, 1, shape=(1, 3, h, w))
