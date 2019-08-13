@@ -22,7 +22,7 @@ from lib.utils.logger import build_logger
 from lib.utils.centernet import get_pred_result
 from lib.modelzoo.centernet import CenterNet
 from lib.data.mscoco.detection import DALICOCODetection
-from lib.data.mscoco.detection import SSDValPipeline, SSDValLoader
+from lib.data.mscoco.detection import ValPipeline, ValLoader
 from lib.data.mscoco.centernet import CenterNetTrainPipeline
 from lib.data.mscoco.centernet import CenterNetTrainLoader
 
@@ -65,13 +65,13 @@ def get_dataloader(config, train_dataset, val_dataset, anchors, input_shape, bat
     num_classes = config['num_classes']
     train_loader = CenterNetTrainLoader(train_pipelines, epoch_size, thread_batch_size, num_classes, input_shape)
     
-    val_pipelines = [SSDValPipeline(device_id=i, batch_size=thread_batch_size,
+    val_pipelines = [ValPipeline(device_id=i, batch_size=thread_batch_size,
                                  data_shape=input_shape[0],
                                  num_workers=16,
                                  dataset_reader=val_dataset[i]) for i in range(num_devices)]
     epoch_size = val_dataset[0].size()
     print ('val dataset epoch size: {}'.format(epoch_size))
-    val_loader = SSDValLoader(val_pipelines, epoch_size, thread_batch_size, input_shape)
+    val_loader = ValLoader(val_pipelines, epoch_size, thread_batch_size, input_shape)
         
     return train_loader, val_loader
 

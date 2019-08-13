@@ -7,7 +7,7 @@ import warnings
 import time
 import datetime
 import numpy as np
-sys.path.insert(0, os.path.expanduser('~/lib/incubator-mxnet/python'))
+sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 import mxnet as mx
 from mxnet import nd
 from mxnet import gluon
@@ -18,6 +18,26 @@ from lib.utils.export_helper import export_block
 
 
 class BaseSolver(object):
+    def __init__(self, config):
+        self.config = config
+
+        self.ctx = [mx.gpu(int(i)) for i in config['gpus'].split(',') if i.strip()]
+
+        self.net = self.build_net()
+
+        self.train_data, self.val_data = self.get_dataloader()
+        self.eval_metric = self.get_eval_metric()
+        self.width, self.height = config['input_shape']
+
+        prefix = '{}_{}_{}_{}x{}'.format(config['model'], config['dataset'],
+                                              config['network'], config['input_shape'][0],
+                                              config['input_shape'][1]) 
+        self.save_prefix = os.path.expanduser(os.path.join(config['save_prefix'], prefix))
+        
+        self.get_logger()
+
+        logging.info('CenterNetSolver initialized')
+
 
     def build_net(self):
         return NotImplementedError
@@ -41,7 +61,7 @@ class BaseSolver(object):
         build_logger(log_path)
 
     def save_params(self, epoch):
-        save_frequent = self.config['save_frequent']
+        save_frequent = self.config.get('save_frequent', 10)
         if epoch % save_frequent == 0:
             # save parameters
             # filename = '{}-{:04d}.params'.format(self.output_prefix, model_epoch)

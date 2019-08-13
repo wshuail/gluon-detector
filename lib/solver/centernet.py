@@ -13,7 +13,7 @@ from mxnet import autograd
 from mxnet.contrib import amp
 from nvidia.dali.plugin.mxnet import DALIGenericIterator
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
-from lib.loss import FocalLoss
+from lib.centernet_loss import FocalLoss
 from lib.modelzoo.centernet import CenterNet
 from lib.data.mscoco.centernet import CenterNetTrainPipeline
 from lib.data.mscoco.centernet import CenterNetTrainLoader
@@ -26,20 +26,8 @@ from .base import BaseSolver
 
 class CenterNetSolver(BaseSolver):
     def __init__(self, config):
-        super(CenterNetSolver, self).__init__()
-        self.config = config
-
-        self.ctx = [mx.gpu(int(i)) for i in config['gpus'].split(',') if i.strip()]
-
-        self.net = self.build_net()
-
-        self.train_data, self.val_data = self.get_dataloader()
-        self.eval_metric = self.get_eval_metric()
-
-        self.get_logger()
-
-        logging.info('CenterNetSolver initialized')
-
+        super(CenterNetSolver, self).__init__(config=config)
+    
     def build_net(self):
         config = self.config
         network = config['network']
@@ -51,6 +39,7 @@ class CenterNetSolver(BaseSolver):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             net.initialize()
+        logging.info('network initialized done.')
 
         return net
 
@@ -107,20 +96,17 @@ class CenterNetSolver(BaseSolver):
         self.net.collect_params().reset_ctx(self.ctx)
         trainer = gluon.Trainer(
             params=self.net.collect_params(),
-            optimizer='sgd',
+            optimizer=config['optimizer'],
             optimizer_params={'learning_rate': config['lr'],
                               'wd': config['wd'],
                               'momentum': config['momentum']},
             update_on_kvstore=(False if config['amp'] else None)
         )
 
-        if config['amp']:
-            amp.init_trainer(trainer)
-        
         lr_decay = config.get('lr_decay', 0.1)
         lr_steps = sorted([float(ls) for ls in config['lr_decay_epoch'].split(',') if ls.strip()])
 
-        hm_creteria = FocalLoss(sparse_label=False)
+        hm_creteria = FocalLoss()
         offset_creteria = gluon.loss.L1Loss()
         wh_creteria = gluon.loss.L1Loss()
         
@@ -143,8 +129,9 @@ class CenterNetSolver(BaseSolver):
             
             tic = time.time()
             btic = time.time()
-            self.net.hybridize(static_alloc=True, static_shape=True)
-            for i, batch in enumerate(self.train_data):
+            self.net.collect_params().reset_ctx(self.ctx)
+            # self.net.hybridize(static_alloc=True, static_shape=True)
+            for i, (batch, _, _) in enumerate(self.train_data):
                 batch_data = [d.data[0] for d in batch]
                 batch_hm = [d.label[0] for d in batch]
                 batch_offset = [d.label[1] for d in batch]
@@ -153,47 +140,50 @@ class CenterNetSolver(BaseSolver):
                 with autograd.record():
                     hm_losses, offset_losses, wh_losses, sum_losses = [], [], [], []
                     for data, hm, offset, wh in zip(batch_data, batch_hm, batch_offset, batch_wh):
-                        outputs = net(data)
-                        hm_pred, offset_pred, wh_pred = outputs
+                        # print ('input data sum: {}'.format(nd.sum(data)))
+                        outputs = self.net(data)
+                        # hm_pred, offset_pred, wh_pred = outputs
+                        hm_pred = outputs[0]
+                        # print ('sum hm_pred: {}'.format(nd.sum(hm_pred)))
                         
-                        hm_loss = hm_creteria(hm_pred, hm)
-                        offset_loss = offset_creteria(offset_pred, offset)
-                        wh_loss = wh_creteria(wh_pred, wh)
+                        # hm_loss = hm_creteria(hm_pred, hm)
+                        hm_loss = offset_creteria(hm_pred, hm)
+                        # offset_loss = offset_creteria(offset_pred, offset)
+                        # wh_loss = wh_creteria(wh_pred, wh)
 
-                        sum_loss = hm_loss + offset_loss + 0.1*wh_loss
+                        # sum_loss = hm_loss  #  + offset_loss + 0.1*wh_loss
                         
                         hm_losses.append(hm_loss)
-                        offset_losses.append(offset_loss)
-                        wh_losses.append(wh_loss)
+                        # offset_losses.append(offset_loss)
+                        # wh_losses.append(wh_loss)
+                        # sum_losses.append(sum_loss)
 
-                        sum_losses.append(sum_loss)
-
-                    # if config['amp']:
-                    #     with amp.scale_loss(sum_loss, trainer) as scaled_loss:
-                    #         autograd.backward(scaled_loss)
-                    for sum_loss in sum_losses:
-                        autograd.backward(sum_loss)
+                        autograd.backward(hm_loss)
+                    
+                    # for sum_loss in sum_losses:
+                    #     autograd.backward(sum_loss)
                 
                 # since we have already normalized the loss, we don't want to normalize
                 # by batch-size anymore
-                trainer.step(1)
+                trainer.step(batch_size)
 
                 hm_metric.update(0, [l * batch_size for l in hm_losses])
-                offset_metric.update(0, [l * batch_size for l in offset_losses])
-                wh_metric.update(0, [l * batch_size for l in wh_losses])
+                # offset_metric.update(0, [l * batch_size for l in offset_losses])
+                # wh_metric.update(0, [l * batch_size for l in wh_losses])
                 if i > 0 and i % 50 == 0:
                     name1, loss1 = hm_metric.get()
-                    name2, loss2 = offset_metric.get()
-                    name3, loss3 = wh_metric.get()
-                    logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.3f}, {}={:.3f}, {}={:.3f}'.\
-                           format(epoch, i, batch_size/(time.time()-btic), name1, loss1, name2, loss2, name3, loss3))
+                    # name2, loss2 = offset_metric.get()
+                    # name3, loss3 = wh_metric.get()
+                    # logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.3f}, {}={:.3f}, {}={:.3f}'.\
+                    #        format(epoch, i, batch_size/(time.time()-btic), name1, loss1, name2, loss2, name3, loss3))
+                    logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.3f}'.\
+                           format(epoch, i, batch_size/(time.time()-btic), name1, loss1))
             
                 btic = time.time()
-            map_name, mean_ap = self.validation()
-            val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
-            logging.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
-            # self.save_params(epoch)
-
+            # map_name, mean_ap = self.validation()
+            # val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
+            # logging.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
+            self.save_params(epoch)
 
     def validation(self):
         self.eval_metric.reset()

@@ -15,6 +15,7 @@ from nvidia.dali.plugin.mxnet import DALIGenericIterator
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
 from lib.loss import SSDMultiBoxLoss
 from lib.modelzoo.ssd import SSD
+from lib.modelzoo.anchor import generate_level_anchors
 from lib.nn.anchor import get_anchors
 from lib.data.mscoco.ssd import SSDTrainPipeline
 from lib.data.mscoco.detection import ValPipeline
@@ -23,18 +24,16 @@ from lib.metrics.coco_detection import COCODetectionMetric
 from .base import BaseSolver
 
 
-class SSDSolver(BaseSolver):
+class RetinaNetSolver(BaseSolver):
     def __init__(self, config):
-        # super(SSDSolver, self).__init__()
         self.config = config
 
         self.ctx = [mx.gpu(int(i)) for i in config['gpus'].split(',') if i.strip()]
 
         self.net = self.build_net()
-        self.anchors = get_anchors(self.net, config['input_shape'])
+        self.anchors = self.get_anchors()
 
         self.train_data, self.val_data = self.get_dataloader()
-        # self.train_data = self.get_train_loader()
         
         self.eval_metric = self.get_eval_metric()
         
@@ -50,6 +49,14 @@ class SSDSolver(BaseSolver):
             amp.init()
 
         logging.info('SSDSolver initialized')
+
+    def get_anchors(self):
+        image_shape = self.config['input_shape']
+        level_anchors_list = []
+        for i in range(3, 8):
+            level_anchors = generate_level_anchors(i, image_shape)
+            level_anchors_list.append(level_anchors)
+        anchors = np.concatenate(level_anchors_list, axis=0)
 
     def build_net(self):
         config = self.config

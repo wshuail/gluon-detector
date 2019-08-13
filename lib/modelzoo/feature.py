@@ -62,3 +62,7 @@ def centernet_extractor(network, layers):
     output_blocks = SymbolBlock(outputs=output_layers, inputs=inputs, params=params)
     return output_blocks
 
+def network_extractor(network, layers):
+    output_layers, inputs, params = parse_network(network, layers)
+    output_blocks = SymbolBlock(outputs=output_layers, inputs=inputs, params=params)
+    return output_blocks

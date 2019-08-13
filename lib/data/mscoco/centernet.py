@@ -6,38 +6,33 @@ import mxnet as mx
 import numpy as np
 from nvidia import dali
 from nvidia.dali.pipeline import Pipeline
+from nvidia.dali.plugin.mxnet import feed_ndarray
 from .image import gaussian_radius
 from .image import draw_umich_gaussian
 
 class CenterNetTrainPipeline(Pipeline):
-    """DALI Pipeline with SSD training transform.
-
-    Parameters
-    ----------
-    device_id: int
-         DALI pipeline arg - Device id.
-    num_workers:
-        DALI pipeline arg - Number of CPU workers.
-    batch_size:
-        Batch size.
-    data_shape: int
-        Height and width length. (height==width in SSD)
-    anchors: float list
-        Normalized [ltrb] anchors generated from SSD networks.
-        The shape length be ``N*4`` since it is a list of the N anchors that have
-        all 4 float elements.
-    dataset_reader: float
-        Partial pipeline object, which __call__ function has to return
-        (images, bboxes, labels) DALI EdgeReference tuple.
-    """
-    def __init__(self, device_id, batch_size, data_shape, num_workers,
-                 dataset_reader):
+    def __init__(self, split, batch_size, data_shape, num_shards, device_id,
+                 num_workers, root_dir='~/.mxnet/datasets/coco'):
         super(CenterNetTrainPipeline, self).__init__(
             batch_size=batch_size,
             device_id=device_id,
             num_threads=num_workers)
+        
+        file_root = os.path.expanduser(os.path.join(root_dir, split))
+        anno_file_name = 'instances_{}.json'.format(split)
+        annotations_file = os.path.expanduser(os.path.join(root_dir, 'annotations', anno_file_name))
+        self.input = dali.ops.COCOReader(
+            file_root=file_root,
+            annotations_file=annotations_file,
+            skip_empty=True,
+            shard_id=device_id,
+            num_shards=num_shards,
+            ratio=True,
+            ltrb=True,
+            shuffle_after_epoch=False,
+            save_img_ids=True)
 
-        self.dataset_reader = dataset_reader
+        self.decode = dali.ops.HostDecoder(device="cpu", output_type=dali.types.RGB)
 
         # Augumentation techniques
         self.crop = dali.ops.RandomBBoxCrop(
@@ -77,7 +72,31 @@ class CenterNetTrainPipeline(Pipeline):
         self.flip = dali.ops.Flip(device="cpu")
         self.bbflip = dali.ops.BbFlip(device="cpu", ltrb=True)
         self.flip_coin = dali.ops.CoinFlip(probability=0.5)
+        
+        # We need to build the COCOReader ops to parse the annotations
+        # and have acces to the dataset size.
+        # TODO(spanev): Replace by DALI standalone ops when available
+        class DummyMicroPipe(Pipeline):
+            """ Dummy pipeline which sole purpose is to build COCOReader
+            and get the epoch size. To be replaced by DALI standalone op, when available.
+            """
+            def __init__(self):
+                super(DummyMicroPipe, self).__init__(batch_size=1,
+                                                     device_id=0,
+                                                     num_threads=1)
+                self.input = dali.ops.COCOReader(
+                    file_root=file_root,
+                    annotations_file=annotations_file)
+            def define_graph(self):
+                inputs, bboxes, labels = self.input(name="Reader")
+                return (inputs, bboxes, labels)
 
+        micro_pipe = DummyMicroPipe()
+        micro_pipe.build()
+        self._size = micro_pipe.epoch_size(name="Reader")
+        print ('train dataset size {} for split {}'.format(self._size, split))
+        del micro_pipe
+ 
     def define_graph(self):
         saturation = self.rng1()
         contrast = self.rng1()
@@ -85,7 +104,8 @@ class CenterNetTrainPipeline(Pipeline):
         hue = self.rng3()
         coin_rnd = self.flip_coin()
 
-        images, bboxes, labels, img_ids = self.dataset_reader()
+        inputs, bboxes, labels, img_ids = self.input(name="Reader")
+        images = self.decode(inputs)
 
         crop_begin, crop_size, bboxes, labels = self.crop(bboxes, labels)
         images = self.slice(images, crop_begin, crop_size)
@@ -104,15 +124,23 @@ class CenterNetTrainPipeline(Pipeline):
 
         return (images, bboxes.gpu(), labels.gpu(), img_ids.gpu())
 
+    def size(self):
+        """Returns size of COCO dataset
+        """
+        return self._size
+
 
 class CenterNetTrainLoader(object):
-    def __init__(self, pipelines, size, batch_size, num_classes, data_shape):
+    def __init__(self, pipelines, size, batch_size, num_classes, data_shape,
+                 max_objs=128, dense_mode=True):
         self.pipelines = pipelines
         self.size = size
         print ('size {}'.format(size))
         self.batch_size = batch_size
         self.num_classes = num_classes
         self.width, self.height = data_shape
+        self.max_objs = max_objs
+        self.dense_mode = dense_mode
         self.output_w, self.output_h = self.width//4, self.height//4
         self.num_worker = len(pipelines)
         self.batch_size = pipelines[0].batch_size
@@ -132,95 +160,131 @@ class CenterNetTrainLoader(object):
         batch_origin_gtbox = []
         for idx, pipe in enumerate(self.pipelines):
             data, bboxes, labels, img_ids = pipe.run()
-            img, hp, offset, wh, origin_gtbox = self.format_data(data, bboxes, labels, idx)
-            data_batch = mx.io.DataBatch(data=[img], label=[hp, offset, wh])
+            if self.dense_mode:
+                img, hp, offset, wh, origin_gtbox = self.format_data(data, bboxes, labels, idx)
+                data_batch = mx.io.DataBatch(data=[img], label=[hp, offset, wh])
+            else:
+                img, hp, offset, wh, ind, origin_gtbox = self.format_data(data, bboxes, labels, idx)
+                data_batch = mx.io.DataBatch(data=[img], label=[hp, offset, wh, ind])
+            # img, bboxes, labels = self.format_data(data, bboxes, labels, idx)
+            # data_batch = mx.io.DataBatch(data=[img], label=[bboxes, labels])
             img_ids = [int(img_ids.as_cpu().at(idx)) for idx in range(self.batch_size)]
             img_ids = np.array(img_ids)
             batch_data.append(data_batch)
             batch_img_ids.append(img_ids)
             batch_origin_gtbox.append(origin_gtbox)
         
-        """
         self.count += self.num_worker * self.batch_size
-        if self.count > self.size:
-            overflow = self.count - self.size
-            overflow_per_device = overflow // self.num_worker
-            last_batch_data = []
-            last_img_ids = []
-            for data_batch, img_ids in zip(batch_data, batch_img_ids):
-                data = data_batch.data[0][0: self.batch_size-overflow_per_device, :, :, :]
-                label = data_batch.label[0][0: self.batch_size-overflow_per_device, :, :]
-                data_batch = mx.io.DataBatch(data=[data], label=[labels])
-                img_ids = img_ids[0: self.batch_size-overflow_per_device]
-                last_batch_data.append(data_batch)
-                last_img_ids.append(img_ids)
-            batch_data = last_batch_data
-            batch_img_ids = last_img_ids
-        """
         
         return batch_data, batch_img_ids, batch_origin_gtbox
     
     def format_data(self, data, bboxes, labels, idx):
         ctx = mx.gpu(idx)
-        batch_img = []
+        # Copy data from DALI Tensors to MXNet NDArrays
+        data = data.as_tensor()
+        dtype = np.dtype(data.dtype())
+        batch_img = mx.nd.zeros(data.shape(), ctx=ctx, dtype=dtype)
+        feed_ndarray(data, batch_img)
+        
         batch_hp = []
         batch_offset = []
         batch_wh = [] 
         batch_origin_gtbox = []
+        if not self.dense_mode:
+            batch_ind = []
         for i in range(self.batch_size):
-            img = data.as_cpu().at(i)
             
-            img_bbox = bboxes.as_cpu().at(i)
-            img_label = labels.as_cpu().at(i)
-            # print ('img_box shape: {}'.format(img_bbox.shape))
-            # print ('img_label shape: {}'.format(img_label.shape))
+            bbox_tensor = bboxes.at(i)
+            dtype = np.dtype(bbox_tensor.dtype())
+            img_bbox = mx.nd.zeros(bbox_tensor.shape(), ctx=ctx, dtype=dtype)
+            feed_ndarray(bbox_tensor, img_bbox)
+            
+            label_tensor = labels.at(i)
+            dtype = np.dtype(label_tensor.dtype())
+            img_label = mx.nd.zeros(label_tensor.shape(), ctx=ctx, dtype=dtype)
+            feed_ndarray(label_tensor, img_label)
         
             img_bbox[:, 0] *= self.width
             img_bbox[:, 1] *= self.height
             img_bbox[:, 2] *= self.width
             img_bbox[:, 3] *= self.height
-            
-            origin_gtbox = np.concatenate((img_bbox, img_label), axis=-1)
+
+            origin_gtbox = mx.nd.concat(img_bbox, img_label.astype(img_bbox), dim=-1)
             batch_origin_gtbox.append(origin_gtbox)
             
             img_label -= 1  # for map to heatmap as index
 
             num_box = img_bbox.shape[0]
+            # print ('num_box: {}'.format(num_box))
             num_label = img_label.shape[0]
             assert num_box == num_label, 'Expected same length of boxes and labels,\
                 got {} and {}'.format(num_box, num_label)
             
             heatmap = np.zeros((self.num_classes, self.output_h, self.output_w), dtype=np.float32)
-            offset = np.zeros((2, self.output_h, self.output_w), dtype=np.float32)
-            wh = np.zeros((2, self.output_h, self.output_w), dtype=np.float32)
-            for k in range(num_box):
-                bbox = img_bbox[k, :]
-                xmin, ymin, xmax, ymax = bbox
-                cls_id = img_label[k]
-                h, w = (ymax-ymin)//4, (xmax-xmin)//4
+            if self.dense_mode:
+                offset = np.zeros((2, self.output_h, self.output_w), dtype=np.float32)
+                wh = np.zeros((2, self.output_h, self.output_w), dtype=np.float32)
+            else:
+                wh = np.zeros((self.max_objs, 2), dtype=np.float32)
+                offset = np.zeros((self.max_objs, 2), dtype=np.float32)
+                ind = np.zeros((self.max_objs), dtype=np.int64)
+
+            # rescale bbox for feature map
+            img_bbox /= 4.0
+            hs = img_bbox[:, 3] - img_bbox[:, 1]
+            ws = img_bbox[:, 2] - img_bbox[:, 0]
+            cx = (img_bbox[:, 2] + img_bbox[:, 0])/2
+            cy = (img_bbox[:, 3] + img_bbox[:, 1])/2
+            cx = cx.reshape((-1, 1))
+            cy = cy.reshape((-1, 1))
+            ct_xy = mx.nd.concat(cx, cy, dim=1)
+            ct_xy_int = ct_xy.astype(np.int32)
+            
+            for k in range(min(num_box, self.max_objs)):
+                # bbox = img_bbox[k, :].asnumpy()
+                # xmin, ymin, xmax, ymax = bbox
+                h = hs[k].asnumpy()
+                w = ws[k].asnumpy()
+                cls_id = img_label[k].asnumpy()
+                # h, w = (ymax-ymin), (xmax-xmin)
                 radius = gaussian_radius((math.ceil(h), math.ceil(w)))
                 radius = max(0, int(radius))
-                ct = np.array([(bbox[0] + bbox[2]) / (2*4), (bbox[1] + bbox[3]) / (2*4)], dtype=np.float32)
-                ct_int = ct.astype(np.int32)
+                # ct = np.array([(bbox[0] + bbox[2])/2, (bbox[1] + bbox[3])/2], dtype=np.float32)
+                # ct_int = ct.astype(np.int32)
+                ct = ct_xy[k, :].asnumpy()
+                ct_int = ct_xy_int[k, :].asnumpy()
                 heatmap = draw_umich_gaussian(heatmap, cls_id, ct_int, radius)
-                ct_offset = ct - ct_int
+                # print ('hm sum: {}'.format(np.sum(heatmap)))
+                if self.dense_mode:
+                    offset[:, ct_int[1], ct_int[0]] = ct - ct_int  # order: w, h
+                    wh[:, ct_int[1], ct_int[0]] = np.array((h, w)).reshape((1, 2))
+                else:
+                    ind[k] = ct_int[1] * self.output_w + ct_int[0]
+                    offset[k, :] = ct - ct_int  # order: w, h
+                    wh[k, :] = np.array((w, h)).reshape((1, 2))
 
-                offset[:, ct_int[1], ct_int[0]] = ct_offset
-                wh[:, ct_int[1], ct_int[1]] = np.array(h, w)
-            batch_img.append(np.expand_dims(img, axis=0))
             batch_hp.append(np.expand_dims(heatmap, axis=0))
             batch_offset.append(np.expand_dims(offset, axis=0))
             batch_wh.append(np.expand_dims(wh, axis=0))
-        batch_img = np.concatenate(batch_img, axis=0)
+            if not self.dense_mode:
+                batch_ind.append(np.expand_dims(ind, axis=0))
         batch_hp = np.concatenate(batch_hp, axis=0)
         batch_offset = np.concatenate(batch_offset, axis=0)
         batch_wh = np.concatenate(batch_wh, axis=0)
-        batch_img = mx.nd.array(batch_img, ctx=ctx)
+        if not self.dense_mode:
+            batch_ind = np.concatenate(batch_ind, axis=0)
+        
         batch_hp = mx.nd.array(batch_hp, ctx=ctx)
         batch_offset = mx.nd.array(batch_offset, ctx=ctx)
         batch_wh = mx.nd.array(batch_wh, ctx=ctx)
+        if not self.dense_mode:
+            batch_idx = mx.nd.array(batch_ind, ctx=ctx)
 
-        return batch_img, batch_hp, batch_offset, batch_wh, batch_origin_gtbox
+        if self.dense_mode:
+            return batch_img, batch_hp, batch_offset, batch_wh, batch_origin_gtbox
+        else:
+            return batch_img, batch_hp, batch_offset, batch_wh, batch_idx, batch_origin_gtbox
+
     
     def next(self):
         return self.__next__()

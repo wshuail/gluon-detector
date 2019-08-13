@@ -3,8 +3,10 @@ import os
 import sys
 import yaml
 import logging
+sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
 from lib.solver import SSDSolver
+from lib.solver import CenterNetSolver
 
 
 def parse_args():
@@ -20,11 +22,13 @@ if __name__ == '__main__':
     epoch = config['epoch']
     config['lr_decay_epoch'] = ','.join([str(l*epoch) for l in [0.6, 0.8]])
 
-    model = config['model']
-    if model.lower() == 'ssd':
-        solver = SSDSolver(config)
-    else:
-        raise NotImplementedError
+    solver_dict = {
+        'ssd': SSDSolver,
+        'centernet': CenterNetSolver
+    }
+
+    model = config['model'].lower()
+    solver = solver_dict[model](config)
 
     logging.info(config)
 
