@@ -19,18 +19,39 @@ if __name__ == '__main__':
     args = parse_args()
     with open(args.cfg, 'r') as f:
         config = yaml.full_load(f)
-    epoch = config['epoch']
-    config['lr_decay_epoch'] = ','.join([str(l*epoch) for l in [0.6, 0.8]])
-
-    solver_dict = {
-        'ssd': SSDSolver,
-        'centernet': CenterNetSolver
-    }
+    
+    logging.info(config)
 
     model = config['model'].lower()
-    solver = solver_dict[model](config)
-
-    logging.info(config)
+    if model == 'ssd':
+        network = config['network']
+        layers = config['layers']
+        num_filters = config['num_filters']
+        anchor_sizes = config['anchor_sizes']
+        anchor_ratios = config['anchor_ratios']
+        steps = config['steps']
+        dataset = config['dataset']
+        input_shape = config['input_shape']
+        train_split = config['train_split']
+        batch_size = config['batch_size']
+        optimizer = config['optimizer']
+        lr = config['lr']
+        wd = config['wd']
+        momentum = config['momentum']
+        epoch = config['epoch']
+        lr_decay = config.get('lr_decay', 0.1)
+        train_split = config['train_split']
+        val_split = config['val_split']
+        use_amp = config['use_amp']
+        gpus = config['gpus']
+        save_prefix = config['save_prefix']
+        solver = SSDSolver(network, layers, num_filters, anchor_sizes,
+                           anchor_ratios, steps, dataset, input_shape,
+                           batch_size, optimizer, lr, wd, momentum, epoch,
+                           lr_decay, train_split,
+                           val_split, use_amp, gpus, save_prefix)
+    else:
+        pass
 
     solver.train()
 

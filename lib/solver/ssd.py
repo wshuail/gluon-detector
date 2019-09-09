@@ -5,6 +5,7 @@ import yaml
 import logging
 import warnings
 import time
+import datetime
 sys.path.insert(0, os.path.expanduser('~/lib/incubator-mxnet/python'))
 import mxnet as mx
 from mxnet import nd
@@ -13,9 +14,12 @@ from mxnet import autograd
 from mxnet.contrib import amp
 from nvidia.dali.plugin.mxnet import DALIGenericIterator
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
+from lib.utils.logger import build_logger
+from lib.utils.export_helper import export_block
 from lib.loss import SSDMultiBoxLoss
 from lib.modelzoo.ssd import SSD
-from lib.nn.anchor import get_anchors
+from lib.anchor.ssd import generate_ssd_anchors
+# from lib.nn.anchor import get_anchors
 from lib.data.mscoco.ssd import SSDTrainPipeline
 from lib.data.mscoco.detection import ValPipeline
 from lib.data.mscoco.detection import ValLoader
@@ -24,61 +28,88 @@ from .base import BaseSolver
 
 
 class SSDSolver(BaseSolver):
-    def __init__(self, config):
-        # super(SSDSolver, self).__init__()
-        self.config = config
+    def __init__(self, network, layers, num_filters, anchor_sizes, anchor_ratios, steps,
+                 dataset, input_shape, batch_size, optimizer, lr, wd, momentum, epoch,
+                 lr_decay, train_split='train2017', val_split='val2017',
+                 use_amp=False, gpus='0,1,2,3', save_prefix='~/gluon_detector/output'):
+        self.network = network
+        self.layers = layers
+        self.num_filters = num_filters
+        self.anchor_sizes = list(zip(anchor_sizes[:-1], anchor_sizes[1:]))
+        self.anchor_ratios = anchor_ratios
+        self.steps = steps
 
-        self.ctx = [mx.gpu(int(i)) for i in config['gpus'].split(',') if i.strip()]
+        self.dataset = dataset
 
+        if isinstance(input_shape, int):
+            self.input_size = input_size
+            self.input_shape = (input_shape, input_shape)
+        elif isinstance(input_shape, (tuple, list)):
+            self.input_shape = input_shape
+            self.input_size = input_shape[0]
+        else:
+            raise TypeError ('Expected input_shape to be either int or tuple, \
+                but got {}'.format(type(input_shape)))
+        self.width, self.height = self.input_shape
+
+        self.batch_size = batch_size
+        self.train_split = train_split
+        self.val_split = val_split
+        self.optimizer = optimizer
+        self.lr = lr
+        self.wd = wd
+        self.momentum = momentum
+        self.epoch = epoch
+        self.lr_decay = lr_decay
+        self.lr_decay_epoch = ','.join([str(l*epoch) for l in [0.6, 0.8]])
+
+        self.use_amp = use_amp
+        
+        self.ctx = [mx.gpu(int(i)) for i in gpus.split(',') if i.strip()]
+
+        self.save_prefix = save_prefix
+
+        self.anchors = self.get_anchors()
         self.net = self.build_net()
-        self.anchors = get_anchors(self.net, config['input_shape'])
 
         self.train_data, self.val_data = self.get_dataloader()
-        # self.train_data = self.get_train_loader()
         
         self.eval_metric = self.get_eval_metric()
         
-        self.width, self.height = config['input_shape']
-        prefix = '{}_{}_{}_{}x{}'.format(config['model'], config['dataset'],
-                                              config['network'], config['input_shape'][0],
-                                              config['input_shape'][1]) 
-        self.save_prefix = os.path.expanduser(os.path.join(config['save_prefix'], prefix))
+        prefix = 'ssd_{}_{}_{}x{}'.format(self.dataset, self.network, self.input_shape[0],
+                                          self.input_shape[1])
+        self.save_prefix = os.path.expanduser(os.path.join(save_prefix, prefix))
 
         self.get_logger()
 
-        if config['amp']:
+        if self.use_amp:
             amp.init()
+
+        self.save_frequent = 10
 
         logging.info('SSDSolver initialized')
 
     def build_net(self):
-        config = self.config
-        network = config['network']
-        layers = config['layers']
-        num_filters = config['num_filters']
-        anchor_sizes = config['anchor_sizes']
-        anchor_ratios = config['anchor_ratios']
-        steps = config['steps']
-        net = SSD(network, layers, num_filters, 80, anchor_sizes, anchor_ratios, steps)
-    
+        net = SSD(self.network, self.layers, self.num_filters, 80,
+                  self.anchor_sizes, self.anchor_ratios, self.steps,
+                  anchors=self.anchors)
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             net.initialize()
-
         return net
+
+    def get_anchors(self):
+        anchors = generate_ssd_anchors(self.input_size, self.anchor_ratios)
+        return anchors
 
     def get_dataloader(self):
         logging.info('getting data loader.')
-        config = self.config
         num_devices = len(self.ctx)
-        train_split = config['train_split']
-        batch_size = config['batch_size']
-        input_shape = config['input_shape']
-        thread_batch_size = batch_size // num_devices
+        thread_batch_size = self.batch_size // num_devices
         print ("train dataloder")
-        train_pipelines = [SSDTrainPipeline(split=train_split,
+        train_pipelines = [SSDTrainPipeline(split=self.train_split,
                                             batch_size=thread_batch_size,
-                                            data_shape=input_shape[0],
+                                            data_shape=self.input_shape[0],
                                             num_shards=num_devices,
                                             device_id=i,
                                             anchors=self.anchors,
@@ -90,52 +121,44 @@ class SSDSolver(BaseSolver):
                                            epoch_size, auto_reset=True)
 
         print ("val dataloder")
-        val_split = self.config['val_split']
-        val_pipelines = [ValPipeline(split=val_split, batch_size=thread_batch_size,
-                                     data_shape=input_shape[0], num_shards=num_devices,
+        val_pipelines = [ValPipeline(split=self.val_split, batch_size=thread_batch_size,
+                                     data_shape=self.input_shape[0], num_shards=num_devices,
                                      device_id=i, num_workers=16) for i in range(num_devices)]
         epoch_size = val_pipelines[0].size()
-        val_loader = ValLoader(val_pipelines, epoch_size, thread_batch_size, input_shape)
+        val_loader = ValLoader(val_pipelines, epoch_size, thread_batch_size, self.input_shape)
         print ('load dataloder done')
 
         return train_loader, val_loader
     
     def get_eval_metric(self):
-        config = self.config
-        log_file = '{}_{}_{}_{}x{}_eval'.format(config['model'], config['dataset'], config['network'],
-                                                config['input_shape'][0], config['input_shape'][1]) 
-        log_path = os.path.expanduser(os.path.join(config['save_prefix'], log_file))
-
-        val_split = self.config['val_split']
-        
-        val_metric = COCODetectionMetric(dataset=val_split,
+        log_file = 'ssd_{}_{}_{}x{}_eval'.format(self.dataset, self.network,
+                                                 self.input_shape[0], self.input_shape[1]) 
+        log_path = os.path.expanduser(os.path.join(self.save_prefix, log_file))
+        val_metric = COCODetectionMetric(dataset=self.val_split,
                                          save_prefix=log_path,
                                          use_time=False,
                                          cleanup=True,
-                                         data_shape=config['input_shape'])
+                                         data_shape=self.input_shape)
         return val_metric
     
     def train(self):
-        config = self.config
 
-        batch_size = config['batch_size']
-        
         self.net.collect_params().reset_ctx(self.ctx)
         
         trainer = gluon.Trainer(
             params=self.net.collect_params(),
             optimizer='sgd',
-            optimizer_params={'learning_rate': config['lr'],
-                              'wd': config['wd'],
-                              'momentum': config['momentum']},
-            update_on_kvstore=(False if config['amp'] else None)
+            optimizer_params={'learning_rate': self.lr,
+                              'wd': self.wd,
+                              'momentum': self.momentum},
+            update_on_kvstore=(False if self.use_amp else None)
         )
 
-        if config['amp']:
+        if self.use_amp:
             amp.init_trainer(trainer)
         
-        lr_decay = config.get('lr_decay', 0.1)
-        lr_steps = sorted([float(ls) for ls in config['lr_decay_epoch'].split(',') if ls.strip()])
+        lr_decay = self.lr_decay
+        lr_steps = sorted([float(ls) for ls in self.lr_decay_epoch.split(',') if ls.strip()])
 
         mbox_loss = SSDMultiBoxLoss()
         ce_metric = mx.metric.Loss('CrossEntropy')
@@ -143,7 +166,7 @@ class SSDSolver(BaseSolver):
 
         logging.info('Start training from scratch...')
         
-        for epoch in range(config['epoch']):
+        for epoch in range(self.epoch):
             while lr_steps and epoch > lr_steps[0]:
                 new_lr = trainer.learning_rate*lr_decay
                 lr_steps.pop(0)
@@ -170,7 +193,7 @@ class SSDSolver(BaseSolver):
                         box_preds.append(box_pred)
                     sum_loss, cls_loss, box_loss = mbox_loss(
                         cls_preds, box_preds, cls_targets, box_targets)
-                    if config['amp']:
+                    if self.use_amp:
                         with amp.scale_loss(sum_loss, trainer) as scaled_loss:
                             autograd.backward(scaled_loss)
                     else:
@@ -178,13 +201,13 @@ class SSDSolver(BaseSolver):
                 # since we have already normalized the loss, we don't want to normalize
                 # by batch-size anymore
                 trainer.step(1)
-                ce_metric.update(0, [l * batch_size for l in cls_loss])
-                smoothl1_metric.update(0, [l * batch_size for l in box_loss])
+                ce_metric.update(0, [l * self.batch_size for l in cls_loss])
+                smoothl1_metric.update(0, [l * self.batch_size for l in box_loss])
                 if i > 0 and i % 50 == 0:
                     name1, loss1 = ce_metric.get()
                     name2, loss2 = smoothl1_metric.get()
                     logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.3f}, {}={:.3f}'.\
-                           format(epoch, i, batch_size/(time.time()-btic), name1, loss1, name2, loss2))
+                           format(epoch, i, self.batch_size/(time.time()-btic), name1, loss1, name2, loss2))
             
                 btic = time.time()
             map_name, mean_ap = self.validation()
@@ -223,6 +246,31 @@ class SSDSolver(BaseSolver):
             # update metric
             self.eval_metric.update(det_bboxes, det_ids, det_scores, img_ids, gt_bboxes, gt_ids, gt_difficults)
         return self.eval_metric.get()
+    
+    def get_logger(self):
+        timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+        log_path = '{}_train_{}.log'.format(self.save_prefix, timestamp) 
+        # log_path = os.path.expanduser(log_file)
+        build_logger(log_path)
+
+    def save_params(self, epoch):
+        if epoch % self.save_frequent == 0:
+            # save parameters
+            # filename = '{}-{:04d}.params'.format(self.output_prefix, model_epoch)
+            # self.net.save_parameters(filename=filename)
+            # logging.info('[Epoch {}] save checkpoint to {}'.format(epoch, filename))
+
+            # export model
+            data_shape = (self.height, self.width, 3)
+            deploy_prefix = self.save_prefix + '-deploy'
+            export_block(path=deploy_prefix,
+                         block=self.net,
+                         data_shape=data_shape,
+                         epoch=epoch,
+                         preprocess=False,
+                         layout='CHW',
+                         ctx=self.ctx[0])
+            logging.info('[Epoch {}] export model to {}-{:04d}.params'.format(epoch, deploy_prefix, epoch))
 
 
 

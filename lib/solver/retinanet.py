@@ -57,6 +57,7 @@ class RetinaNetSolver(BaseSolver):
             level_anchors = generate_level_anchors(i, image_shape)
             level_anchors_list.append(level_anchors)
         anchors = np.concatenate(level_anchors_list, axis=0)
+        return anchors
 
     def build_net(self):
         config = self.config

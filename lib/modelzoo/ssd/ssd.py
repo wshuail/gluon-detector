@@ -9,53 +9,54 @@ from ..target import SSDAnchorGenerator
 
 class SSD(nn.HybridBlock):
     def __init__(self, network, layers, num_filters, num_classes, anchor_sizes, anchor_ratios,
-                 steps, max_anchor_size=128, nms_thresh=0.45, nms_topk=400, post_nms=100,
-                 anchor_mode=False, **kwargs):
+                 steps, anchors, max_anchor_size=128, nms_thresh=0.45, nms_topk=400, post_nms=100,
+                 **kwargs):
         super(SSD, self).__init__(**kwargs)
         self.num_classes = num_classes
         self.nms_thresh = nms_thresh
         self.nms_topk = nms_topk
         self.post_nms = post_nms
-        
-        anchor_sizes = list(zip(anchor_sizes[:-1], anchor_sizes[1:]))
-        
-        self.features = expand_network(network, layers, num_filters)
-        num_layers = len(layers) + len(num_filters)
+        num_anchors = [len(size) + len(ratio) - 1 for (size, ratio) in zip(anchor_sizes, anchor_ratios)]
 
-        self.anchor_generators = nn.HybridSequential()
-        self.cls_predictors = nn.HybridSequential()
-        self.loc_predictors = nn.HybridSequential()
-        asz = max_anchor_size
-        for index, size, ratio, step in zip(range(num_layers), anchor_sizes, anchor_ratios, steps):
-            anchor_generator = SSDAnchorGenerator(index, size, ratio, step, asz)
-            self.anchor_generators.add(anchor_generator)
-            asz = max(asz // 2, 16)  # pre-compute larger than 16x16 anchor map
+
+        with self.name_scope():
+
+            if not isinstance(anchors, nd.NDArray):
+                anchors = nd.array(anchors)
+            anchors = nd.reshape(anchors, (1, -1, 4))
+            self.anchors = self.params.get_constant('anchors', anchors)
             
-            num_anchor = len(size) + len(ratio) - 1
-            self.cls_predictors.add(nn.Conv2D(num_anchor*(self.num_classes+1), kernel_size=(3, 3),
-                                              strides=(1, 1), padding=(1, 1),
-                                              weight_initializer=mx.init.Xavier(magnitude=2),
-                                              bias_initializer='zeros'))
-            self.loc_predictors.add(nn.Conv2D(num_anchor*4, kernel_size=(3, 3), strides=(1, 1),
-                                              padding=(1, 1),
-                                              weight_initializer=mx.init.Xavier(magnitude=2),
-                                              bias_initializer='zeros'))
+            self.features = expand_network(network, layers, num_filters)
+            num_layers = len(layers) + len(num_filters)
 
-        self.bbox_decoder = BoxDecoder()
-        self.cls_decoder = MultiPerClassDecoder(num_class=self.num_classes+1)
+            self.cls_predictors = nn.HybridSequential()
+            self.loc_predictors = nn.HybridSequential()
+            for index, num_anchor in zip(range(num_layers), num_anchors):
+                self.cls_predictors.add(nn.Conv2D(num_anchor*(self.num_classes+1), kernel_size=(3, 3),
+                                                  strides=(1, 1), padding=(1, 1),
+                                                  weight_initializer=mx.init.Xavier(magnitude=2),
+                                                  bias_initializer='zeros'))
+                self.loc_predictors.add(nn.Conv2D(num_anchor*4, kernel_size=(3, 3), strides=(1, 1),
+                                                  padding=(1, 1),
+                                                  weight_initializer=mx.init.Xavier(magnitude=2),
+                                                  bias_initializer='zeros'))
 
-    def hybrid_forward(self, F, x):
+            self.bbox_decoder = BoxDecoder()
+            self.cls_decoder = MultiPerClassDecoder(num_class=self.num_classes+1)
+
+    def hybrid_forward(self, F, x, anchors=None):
         features = self.features(x)
         
-        cls_preds, loc_preds, anchors = [], [], []
-        for feature, cls_predictor, loc_predictor, anchor_generator in \
-                zip(features, self.cls_predictors, self.loc_predictors, self.anchor_generators):
+        # avoid bug in https://github.com/apache/incubator-mxnet/issues/13967
+        anchors = F.identity(anchors)
+        
+        cls_preds, loc_preds, = [], []
+        for feature, cls_predictor, loc_predictor, in \
+                zip(features, self.cls_predictors, self.loc_predictors, ):
             cls_pred = cls_predictor(feature)
             cls_preds.append(cls_pred)
             loc_pred = loc_predictor(feature)
             loc_preds.append(loc_pred)
-            anchor = anchor_generator(feature)
-            anchors.append(anchor)
 
         cls_preds = [F.flatten(F.transpose(cp, (0, 2, 3, 1))) for cp in cls_preds]
         cls_preds = F.concat(*cls_preds, dim=1).reshape((0, -1, self.num_classes+1))
@@ -63,9 +64,8 @@ class SSD(nn.HybridBlock):
         loc_preds = [F.flatten(F.transpose(lp, (0, 2, 3, 1))) for lp in loc_preds]
         loc_preds = F.concat(*loc_preds, dim=1).reshape((0, -1, 4))
 
-        anchors = F.concat(*anchors, dim=1).reshape((0, -1, 4))
-        
         if autograd.is_training():
+            # just return anchors to avoid mxnet error
             return cls_preds, loc_preds, anchors
 
         # bboxes: (B, N, 4)

@@ -61,8 +61,7 @@ class BaseSolver(object):
         build_logger(log_path)
 
     def save_params(self, epoch):
-        save_frequent = self.config.get('save_frequent', 10)
-        if epoch % save_frequent == 0:
+        if epoch % self.save_frequent == 0:
             # save parameters
             # filename = '{}-{:04d}.params'.format(self.output_prefix, model_epoch)
             # self.net.save_parameters(filename=filename)
