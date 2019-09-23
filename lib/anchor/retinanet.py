@@ -3,9 +3,7 @@ import sys
 import numpy as np
 sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 import mxnet as mx
-import mxnet as mx
-from mxnet import nd
-from mxnet.gluon import nn
+
 
 def generate_anchors(base_size=16, ratios=None, scales=None):
     """
@@ -65,8 +63,6 @@ def shift(shape, stride, anchors):
 
 def generate_level_anchors(stage_index, image_shape, size=None, stride=None, ratios=None,
                            scales=None, **kwargs):
-    # assert (stage_index in [3, 4, 5, 6, 7]) ('Expected stage_index in range(3, 8), but got {}'.format(stage_index))
-
     if size is None:
         size = 2 ** (stage_index + 2)
     if stride is None:
@@ -84,21 +80,30 @@ def generate_level_anchors(stage_index, image_shape, size=None, stride=None, rat
     
     base_anchor = generate_anchors(size, ratios, scales)
     anchors = shift(image_shape, stride, base_anchor)
-    # print ('size: {}'.format(size))
-    # print ('stride: {}'.format(stride))
-    # print ('base_anchor: {}'.format(base_anchor))
-    # print ('anchors: {}'.format(anchors))
-
+    
     return anchors
 
 
-if __name__ == '__main__':
-    image_shape = (224, 224)
+def generate_retinanet_anchors(image_shape):
     level_anchors_list = []
     for i in range(3, 8):
         level_anchors = generate_level_anchors(i, image_shape)
         level_anchors_list.append(level_anchors)
-        # print (level_anchors)
     anchors = np.concatenate(level_anchors_list, axis=0)
+    # change anchors from (xmin, ymin, xmax, ymax) to (x_ctr, y_ctr, w, h) 
+    anchors[:, 0] = (anchors[:, 0] + anchors[:, 2])/2
+    anchors[:, 1] = (anchors[:, 1] + anchors[:, 3])/2
+    anchors[:, 2] = anchors[:, 2] - anchors[:, 0]
+    anchors[:, 3] = anchors[:, 3] - anchors[:, 1]
+
+    anchors = mx.nd.array(anchors)
+    
+    return anchors
+
+
+if __name__ == '__main__':
+    image_shape = (512, 512)
+    anchors = generate_retinanet_anchors(image_shape)
+    print ('anchors: {}'.format(anchors))
     print (anchors.shape)
 

@@ -1,26 +1,23 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 import sys
 import time
 import logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 import numpy as np
-
+sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 import mxnet as mx
+from mxnet import autograd
 from mxnet import gluon
 from mxnet.gluon.data.vision import transforms
 from mxnet.gluon.block import SymbolBlock
 
 
-__all__ = ['CenterNetDetector']
+__all__ = ['Detector']
 
 
-class CenterNetDetector(object):
-    def __init__(self, params_file, input_size=320,
-                 gpu_id=0, nms_thresh=None, nms_topk=400,
+class Detector(object):
+    def __init__(self, params_file, input_size=320, gpu_id=0,
+                 batch_size=4, nms_thresh=None, nms_topk=400,
                  force_suppress=False):
         if isinstance(input_size, int):
             self.width, self.height = input_size, input_size
@@ -29,6 +26,7 @@ class CenterNetDetector(object):
         else:
             raise ValueError('Expected int or tuple for input size')
         self.ctx = mx.gpu(gpu_id)
+        self.batch_size = batch_size
 
         self.transform_fn = transforms.Compose([
             transforms.Resize(input_size),
@@ -41,17 +39,15 @@ class CenterNetDetector(object):
         self.net = SymbolBlock.imports(symbol_file, ['data'], params_file, ctx=self.ctx)
         self.net.hybridize()
 
-    def detect(self, imgs, conf_thresh=0.5, batch_size=4):
-
-        # self.net.set_nms(nms_thresh=nms_thresh, nms_topk=400)
+    def detect(self, imgs):
 
         num_example = len(imgs)
 
         all_detections = []
 
         t0 = time.time()
-        for i in range(0, num_example, batch_size):
-            batch_raw_imgs = imgs[i: min(i+batch_size, num_example)]
+        for i in range(0, num_example, self.batch_size):
+            batch_raw_imgs = imgs[i: min(i+self.batch_size, num_example)]
             orig_sizes = []
             batch_img_lst = []
             for img in batch_raw_imgs:

@@ -1,23 +1,23 @@
 
-model: 'ssd'
+model: 'retinanet'
+
+dataset: 'coco'
+train_split: 'train2017'
+val_split: 'val2017'
 
 input_shape: [512, 512]
-batch_size: 32
+batch_size: 16
 
+optimizer: 'sgd'
 lr: 0.001
 wd: 0.0005
 momentum: 0.9
 gpus: 0,1,2,3
 epoch: 10
-amp: False
-dali: True
-
-anchor_ratios: [[1, 2, 0.5], [1, 2, 0.5, 3, 0.3333], [1, 2, 0.5, 3, 0.3333], [1, 2, 0.5, 3, 0.3333], [1, 2, 0.5], [1, 2, 0.5]]
-anchor_sizes: [[51.2, 102.4], [102.4, 189.4], [189.4, 276.4], [276.4, 363.52], [363.52, 450.6], [450.6, 492]]
-steps: [16, 32, 64, 128, 256, 512]
+use_amp: False
+save_frequent: 10
 
 network: 'resnet50_v1'
 layers: ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']
-num_filters: [512, 512, 256, 256]
 
-save_prefix: '/world/data-gpu-107/wangshuailong/experiments/tmp/ssd'
+save_prefix: '/world/data-gpu-107/wangshuailong/experiments/tmp/'

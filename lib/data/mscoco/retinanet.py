@@ -1,13 +1,10 @@
 from __future__ import absolute_import
 from __future__ import division
 import os
-import sys
-import numpy as np
-sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
-import mxnet as mx
-from mxnet import nd
 from nvidia import dali
 from nvidia.dali.pipeline import Pipeline
+import numpy as np
+import mxnet as mx
 
 
 class RetinaNetTrainPipeline(Pipeline):
@@ -108,8 +105,12 @@ class RetinaNetTrainPipeline(Pipeline):
         """Prepare anchors into ltrb (normalized DALI anchors format list)"""
         if isinstance(anchors, list):
             return anchors
-        anchors_np = anchors.squeeze()  # .asnumpy()
+        anchors_np = anchors.squeeze().asnumpy()
         anchors_np_ltrb = anchors_np.copy()
+        anchors_np_ltrb[:, 0] = anchors_np[:, 0] - 0.5 * anchors_np[:, 2]
+        anchors_np_ltrb[:, 1] = anchors_np[:, 1] - 0.5 * anchors_np[:, 3]
+        anchors_np_ltrb[:, 2] = anchors_np[:, 0] + 0.5 * anchors_np[:, 2]
+        anchors_np_ltrb[:, 3] = anchors_np[:, 1] + 0.5 * anchors_np[:, 3]
         anchors_np_ltrb /= size
         return anchors_np_ltrb.flatten().tolist()
 
@@ -120,14 +121,14 @@ class RetinaNetTrainPipeline(Pipeline):
         hue = self.rng3()
         coin_rnd = self.flip_coin()
 
-        inputs, bboxes, labels, _ = self.input(name="Reader")
+        inputs, bboxes, labels, img_ids = self.input(name="Reader")
         images = self.decode(inputs)
 
-        # crop_begin, crop_size, bboxes, labels = self.crop(bboxes, labels)
-        # images = self.slice(images, crop_begin, crop_size)
+        crop_begin, crop_size, bboxes, labels = self.crop(bboxes, labels)
+        images = self.slice(images, crop_begin, crop_size)
 
-        # images = self.flip(images, horizontal=coin_rnd)
-        # bboxes = self.bbflip(bboxes, horizontal=coin_rnd)
+        images = self.flip(images, horizontal=coin_rnd)
+        bboxes = self.bbflip(bboxes, horizontal=coin_rnd)
         images = self.resize(images)
         images = images.gpu()
         images = self.twist(
@@ -136,58 +137,14 @@ class RetinaNetTrainPipeline(Pipeline):
             contrast=contrast,
             brightness=brightness,
             hue=hue)
-        # images = self.normalize(images)
+        images = self.normalize(images)
         bboxes, labels = self.box_encoder(bboxes, labels)
 
-        return (images, bboxes.gpu(), labels.gpu())
+        return (images, bboxes.gpu(), labels.gpu(), img_ids.gpu())
 
     def size(self):
         """Returns size of COCO dataset
         """
         return self._size
-
-if __name__ == '__main__':
-    sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
-    from lib.modelzoo.anchor import generate_level_anchors
-    from nvidia.dali.plugin.mxnet import DALIGenericIterator
-    split = 'train2017'
-    batch_size = 1
-    data_shape = 512
-    num_shards = 1
-    device_id = 0
-    num_workers = 4
-        
-    image_shape = data_shape
-    level_anchors_list = []
-    for i in range(3, 8):
-        level_anchors = generate_level_anchors(i, image_shape)
-        level_anchors_list.append(level_anchors)
-    anchors = np.concatenate(level_anchors_list, axis=0)
-    
-    pipe = RetinaNetTrainPipeline(split, batch_size, data_shape,
-                                  num_shards, device_id, anchors,
-                                  num_workers)
-    pipe.build()
-    outputs = pipe.run()
-    for output in outputs:
-        if output.is_dense_tensor():
-            output= output.as_tensor()
-            print (output.shape())
-    epoch_size = pipe.size()
-    data_loader = DALIGenericIterator([pipe], [('data', DALIGenericIterator.DATA_TAG),
-                                                         ('bboxes', DALIGenericIterator.LABEL_TAG),
-                                                         ('label', DALIGenericIterator.LABEL_TAG)],
-                                       epoch_size, auto_reset=True)
-    for i, batch in enumerate(data_loader):
-        data = [d.data[0] for d in batch]
-        box_targets = [d.label[0] for d in batch]
-        cls_targets = [nd.cast(d.label[1], dtype='float32') for d in batch]
-        for x, box_target, cls_target in zip(data, box_targets, cls_targets):
-            print (x.shape, box_target.shape, cls_target.shape)
-        if i >= 5:
-            assert False
-
-
-
 
 
