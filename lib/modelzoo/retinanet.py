@@ -1,6 +1,7 @@
 import os
 import sys
 import warnings
+import numpy as np
 sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 import mxnet as mx
 from mxnet import autograd
@@ -26,7 +27,7 @@ class RetinaNet(nn.HybridBlock):
         self.nms_topk = nms_topk
         self.post_nms = post_nms
         
-        num_anchor = 9
+        self.num_anchor = 9
 
         with self.name_scope():
             
@@ -54,30 +55,43 @@ class RetinaNet(nn.HybridBlock):
                 nn.Conv2D(channels=256, kernel_size=(3, 3), strides=(2, 2), padding=(1, 1)))
 
             self.cls_subnet = nn.HybridSequential()
+            pi = 0.01
+            bias = -np.log((1-pi)/pi)
             self.cls_subnet.add(
-                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
-                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
-                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
-                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
-                nn.Conv2D(channels=num_class*num_anchor, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=num_class*self.num_anchor, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01),
+                          bias_initializer=mx.init.Constant(bias)),
                 nn.Activation(activation='sigmoid')
             )
 
             self.loc_subnet = nn.HybridSequential()
             self.loc_subnet.add(
-                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
-                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
-                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
-                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1)),
+                nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
-                nn.Conv2D(channels=4*num_anchor, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1))
+                nn.Conv2D(channels=4*self.num_anchor, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
             )
             
             self.bbox_decoder = BoxDecoder()
@@ -93,21 +107,23 @@ class RetinaNet(nn.HybridBlock):
         p5_1 = self.p5_1(p5)
         p5_2 = self.p5_2(p5_1)
         
-        p5_up = _upsample(p5_1, stride=2)
+        p5_up = F.UpSampling(p5_1, scale=2, sample_type='nearest')
+        # p5_up = _upsample(p5_1, stride=2)
         p5_up = F.slice_like(p5_up, p4* 0, axes=(2, 3))
         p4_1 = self.p4_1(p4) + p5_up
         p4_2 = self.p4_2(p4_1)
         
-        p4_up = _upsample(p4_1, stride=2)
+        p4_up = F.UpSampling(p4_1, scale=2, sample_type='nearest')
+        # p4_up = _upsample(p4_1, stride=2)
         p4_up = F.slice_like(p4_up, p3* 0, axes=(2, 3))
         p3_1 = self.p3_1(p3) + p4_up
         p3_2 = self.p3_2(p3_1)
-
 
         heads = [p3_2, p4_2, p5_2, p6, p7]
 
         cls_heads = [self.cls_subnet(x) for x in heads]
         cls_heads = [F.transpose(cls_head, (0, 2, 3, 1)) for cls_head in cls_heads]
+        cls_heads = [F.reshape(cls_head, (0, 0, 0, self.num_anchor, self.num_class)) for cls_head in cls_heads]
         cls_heads = [F.reshape(cls_head, (0, -1, self.num_class)) for cls_head in cls_heads]
         cls_heads = F.concat(*cls_heads, dim=1)
         

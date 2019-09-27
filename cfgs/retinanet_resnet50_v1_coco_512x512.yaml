@@ -9,13 +9,13 @@ input_shape: [512, 512]
 batch_size: 16
 
 optimizer: 'sgd'
-lr: 0.001
+lr: 0.0001
 wd: 0.0005
 momentum: 0.9
 gpus: 0,1,2,3
 epoch: 10
 use_amp: False
-save_frequent: 10
+save_frequent: 2
 
 network: 'resnet50_v1'
 layers: ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']

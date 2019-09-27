@@ -20,7 +20,7 @@ def conv_act_layer(data, num_filter, kernel, stride, pad, name, use_bn=True):
 
 
 def parse_network(network, layers, inputs='data'):
-
+    sys.path.insert(0, os.path.expanduser('~/gluon-cv/'))
     from gluoncv.model_zoo import get_model
     network = get_model(network, pretrained=True)
 

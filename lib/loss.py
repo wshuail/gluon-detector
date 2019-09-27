@@ -135,11 +135,8 @@ class SSDMultiBoxLoss(gluon.Block):
         # cross device reduction to obtain positive samples in entire batch
         pos_ct = [ct > 0 for ct in cls_target]
         num_pos = [ct.sum() for ct in pos_ct]
-        # num_pos = []
-        # for ct in cls_target:
-        #     pos_samples = (ct > 0)
-        #     num_pos.append(pos_samples.sum())
         num_pos_all = sum([p.asscalar() for p in num_pos])
+        # print ('num_pos_all: {}'.format(num_pos_all))
         if num_pos_all < 1 and self._min_hard_negatives < 1:
             # no positive samples and no hard negatives, return dummy losses
             cls_losses = [nd.sum(cp * 0) for cp in cls_pred]

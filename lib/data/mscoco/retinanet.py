@@ -1,10 +1,13 @@
 from __future__ import absolute_import
 from __future__ import division
 import os
+import sys
+import numpy as np
+sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
+import mxnet as mx
 from nvidia import dali
 from nvidia.dali.pipeline import Pipeline
-import numpy as np
-import mxnet as mx
+from nvidia.dali.plugin.mxnet import feed_ndarray
 
 
 class RetinaNetTrainPipeline(Pipeline):
@@ -28,7 +31,7 @@ class RetinaNetTrainPipeline(Pipeline):
             shuffle_after_epoch=True,
             save_img_ids=True)
 
-        self.decode = dali.ops.HostDecoder(device="cpu", output_type=dali.types.RGB)
+        self.decode = dali.ops.ImageDecoder(device="cpu", output_type=dali.types.RGB)
 
         # Augumentation techniques
         self.crop = dali.ops.RandomBBoxCrop(
@@ -69,9 +72,17 @@ class RetinaNetTrainPipeline(Pipeline):
         self.bbflip = dali.ops.BbFlip(device="cpu", ltrb=True)
         self.flip_coin = dali.ops.CoinFlip(probability=0.5)
 
-        self.box_encoder = dali.ops.BoxEncoder(
+        self.box_encoder_0_5 = dali.ops.BoxEncoder(
             device="cpu",
             criteria=0.5,
+            anchors=self._to_normalized_ltrb_list(anchors, data_shape),
+            offset=True,
+            stds=[0.1, 0.1, 0.2, 0.2],
+            scale=data_shape)
+        
+        self.box_encoder_0_4 = dali.ops.BoxEncoder(
+            device="cpu",
+            criteria=0.4,
             anchors=self._to_normalized_ltrb_list(anchors, data_shape),
             offset=True,
             stds=[0.1, 0.1, 0.2, 0.2],
@@ -138,9 +149,10 @@ class RetinaNetTrainPipeline(Pipeline):
             brightness=brightness,
             hue=hue)
         images = self.normalize(images)
-        bboxes, labels = self.box_encoder(bboxes, labels)
+        bboxes_1, labels_1 = self.box_encoder_0_5(bboxes, labels)
+        bboxes_2, labels_2 = self.box_encoder_0_4(bboxes, labels)
 
-        return (images, bboxes.gpu(), labels.gpu(), img_ids.gpu())
+        return (images, bboxes_1.gpu(), labels_1.gpu(), bboxes_2.gpu(), labels_2.gpu(), img_ids.gpu())
 
     def size(self):
         """Returns size of COCO dataset
@@ -148,3 +160,86 @@ class RetinaNetTrainPipeline(Pipeline):
         return self._size
 
 
+class RetinaNetTrainLoader(object):
+    def __init__(self, pipelines):
+        self.pipelines = pipelines
+        self.num_worker = len(pipelines)
+        self.size = pipelines[0].size()
+        self.batch_size = pipelines[0].batch_size
+        for pipeline in self.pipelines:
+            pipeline.build()
+        
+        self.count = 0
+    
+    def __next__(self):
+        
+        if self.count >= self.size:
+            self.reset()
+            raise StopIteration
+        
+        batch_data = []
+        batch_img_ids = []
+        batch_origin_gtbox = []
+        for idx, pipe in enumerate(self.pipelines):
+            ctx = mx.gpu(idx)
+            batch_images, batch_bboxes, batch_labels_1, _, batch_labels_2, batch_img_ids = pipe.run()
+            for i in range(self.batch_size):
+                image_tensor = batch_images.at(i)
+                image = mx.nd.zeros(image_tensor.shape(), ctx=ctx, dtype=np.dtype(image_tensor.dtype()))
+                feed_ndarray(image_tensor, image)
+                
+                bboxes_tensor = batch_bboxes.at(i)
+                bboxes = mx.nd.zeros(bboxes_tensor.shape(), ctx=ctx, dtype=np.dtype(bboxes_tensor.dtype()))
+                feed_ndarray(bboxes_tensor, bboxes)
+                
+                labels_1_tensor = batch_labels_1.at(i)
+                labels_1 = mx.nd.zeros(labels_1_tensor.shape(), ctx=ctx, dtype=np.dtype(labels_1_tensor.dtype()))
+                feed_ndarray(labels_1_tensor, labels_1)
+                
+                labels_2_tensor = batch_labels_2.at(i)
+                labels_2 = mx.nd.zeros(labels_2_tensor.shape(), ctx=ctx, dtype=np.dtype(labels_2_tensor.dtype()))
+                feed_ndarray(labels_2_tensor, labels_2)
+                
+                print ('image shape: {}'.format(image.shape))
+                print ('bboxes shape: {}'.format(bboxes.shape))
+                print ('labels_1 shape: {}'.format(labels_1.shape))
+                print ('labels_2 shape: {}'.format(labels_2.shape))
+            
+        
+        
+        self.count += self.num_worker * self.batch_size
+        
+        return batch_data, batch_img_ids, batch_origin_gtbox
+        
+    def next(self):
+        return self.__next__()
+    
+    def __iter__(self):
+        return self
+
+    def reset(self):
+        for pipe in self.pipelines:
+            pipe.reset()
+        self.count = 0
+
+
+if __name__ == '__main__':
+    sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
+    from lib.anchor.retinanet import generate_retinanet_anchors
+    train_split = 'train2017'
+    thread_batch_size = 4
+    input_size = 512
+    num_devices = 4
+    anchors = generate_retinanet_anchors(input_size)
+    train_pipelines = [RetinaNetTrainPipeline(split=train_split,
+                                        batch_size=thread_batch_size,
+                                        data_shape=input_size,
+                                        num_shards=num_devices,
+                                        device_id=i,
+                                        anchors=anchors,
+                                        num_workers=16) for i in range(num_devices)]
+    data_loader = RetinaNetTrainLoader(train_pipelines)
+    for data_batch in iter(data_loader):
+        print ('xx')
+
+ 

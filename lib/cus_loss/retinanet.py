@@ -20,10 +20,11 @@ class FocalLoss(Loss):
         self._debug = debug
 
     def hybrid_forward(self, F, pred, label):
-        print ('cls max pred: {}'.format(F.max(pred)))
-        print ('cls sum pred: {}'.format(F.sum(pred)))
         pred = F.clip(pred, 1e-4, 1-1e-4)
-        # print ('pred: {}'.format(pred))
+        
+        mask = F.where(label == -1, F.zeros_like(label), F.ones_like(label))
+        mask = F.expand_dims(mask, axis=-1)
+        mask = F.tile(mask, reps=(1, 1, self._num_class))
 
         # num of positive samples
         num_pos = F.where(label>0, F.ones_like(label), F.zeros_like(label))
@@ -32,8 +33,8 @@ class FocalLoss(Loss):
         # print ('cls num_pos: {}'.format(num_pos))
         
         # convert 0 to -1 for one_hot encoding
-        # encode coco class to be [0, 79] instead of [1, 80]
         label = F.where(label == 0, F.ones_like(label)*-1, label)
+        # encode coco class to be [0, 79] instead of [1, 80] for one-hot
         label = F.where(label != -1, label-1, label)
         label = F.one_hot(label, self._num_class)
 
@@ -46,6 +47,7 @@ class FocalLoss(Loss):
         bce = -(label * F.log(pred) + (1.0-label) * F.log(1.0-pred))
 
         loss = focal_weight * bce
+        loss = loss*mask
 
         loss = F.sum(loss, axis=0, exclude=True)/num_pos
 
@@ -58,8 +60,8 @@ class HuberLoss(Loss):
         self._rho = rho
 
     def hybrid_forward(self, F, pred, label):
-        print ('box max pred: {}'.format(F.max(pred)))
-        print ('box sum pred: {}'.format(F.sum(pred)))
+        # print ('box max pred: {}'.format(F.max(pred)))
+        # print ('box sum pred: {}'.format(F.sum(pred)))
         DEBUG = False
         # num of positive samples
         pos = F.where(label != 0, F.ones_like(label), F.zeros_like(label))

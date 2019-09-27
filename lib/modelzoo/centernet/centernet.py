@@ -5,7 +5,7 @@ import mxnet as mx
 from mxnet import gluon
 from mxnet.gluon import nn
 
-sys.path.insert(0, os.path.expanduser('~/lib/gluon-cv'))
+sys.path.insert(0, os.path.expanduser('~/gluon-cv'))
 from gluoncv.model_zoo import get_model
 
 from ..feature import centernet_extractor

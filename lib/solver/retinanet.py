@@ -104,8 +104,10 @@ class RetinaNetSolver(object):
                                             num_workers=16) for i in range(num_devices)]
         epoch_size = train_pipelines[0].size()
         train_loader = DALIGenericIterator(train_pipelines, [('data', DALIGenericIterator.DATA_TAG),
-                                                             ('bboxes', DALIGenericIterator.LABEL_TAG),
-                                                             ('label', DALIGenericIterator.LABEL_TAG),
+                                                             ('bboxes_1', DALIGenericIterator.LABEL_TAG),
+                                                             ('label_1', DALIGenericIterator.LABEL_TAG),
+                                                             ('bboxes_2', DALIGenericIterator.LABEL_TAG),
+                                                             ('label_2', DALIGenericIterator.LABEL_TAG),
                                                              ('img_ids', DALIGenericIterator.LABEL_TAG)],
                                            epoch_size, auto_reset=True)
 
@@ -129,6 +131,19 @@ class RetinaNetSolver(object):
                                          cleanup=True,
                                          data_shape=self.input_shape)
         return val_metric
+    
+    @staticmethod
+    def get_cls_targets(cls_targets_1, cls_targets_2):
+        cls_targets = []
+        for (cls_target_1, cls_target_2) in zip(cls_targets_1, cls_targets_2):
+            cls_target_1_idx = nd.where(cls_target_1 > 0, nd.ones_like(cls_target_1), nd.zeros_like(cls_target_1))
+            cls_target_2_idx = nd.where(cls_target_2 > 0, nd.ones_like(cls_target_2), nd.zeros_like(cls_target_2))
+            cls_target_idx = nd.where(cls_target_1_idx == cls_target_2_idx, nd.ones_like(cls_target_1_idx),\
+                                      nd.zeros_like(cls_target_1_idx))
+            cls_target = nd.where(cls_target_idx, cls_target_1, nd.ones_like(cls_target_1)*-1)
+            cls_targets.append(cls_target)
+        return cls_targets
+
     
     def train(self):
 
@@ -172,7 +187,11 @@ class RetinaNetSolver(object):
             for i, batch in enumerate(self.train_data):
                 data = [d.data[0] for d in batch]
                 box_targets = [d.label[0] for d in batch]
-                cls_targets = [nd.cast(d.label[1], dtype='float32') for d in batch]
+                cls_targets_1 = [nd.cast(d.label[1], dtype='float32') for d in batch]
+                # box_targets_2 = [d.label[2] for d in batch]
+                cls_targets_2 = [nd.cast(d.label[3], dtype='float32') for d in batch]
+
+                cls_targets = self.get_cls_targets(cls_targets_1, cls_targets_2)
                 
                 with autograd.record():
                     cls_preds = []
@@ -187,7 +206,6 @@ class RetinaNetSolver(object):
                                 zip(box_preds, box_targets)]
                     sum_loss = [(cl+bl) for cl, bl in zip(cls_loss, box_loss)]
                     
-            """
                     if self.use_amp:
                         with amp.scale_loss(sum_loss, trainer) as scaled_loss:
                             autograd.backward(scaled_loss)
@@ -195,7 +213,6 @@ class RetinaNetSolver(object):
                         autograd.backward(sum_loss)
                 # since we have already normalized the loss, we don't want to normalize
                 # by batch-size anymore
-                # trainer.step(self.batch_size)
                 trainer.step(1)
                 cls_metric.update(0, [l * self.batch_size for l in cls_loss])
                 box_metric.update(0, [l * self.batch_size for l in box_loss])
@@ -212,7 +229,6 @@ class RetinaNetSolver(object):
             val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
             logging.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
             self.save_params(epoch)
-            """
 
     def validation(self):
         self.eval_metric.reset()

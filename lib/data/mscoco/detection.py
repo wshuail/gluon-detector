@@ -100,7 +100,7 @@ class ValPipeline(Pipeline):
             shuffle_after_epoch=False,
             save_img_ids=True)
 
-        self.decode = dali.ops.HostDecoder(device="cpu", output_type=dali.types.RGB)
+        self.decode = dali.ops.ImageDecoder(device="cpu", output_type=dali.types.RGB)
 
         self.resize = dali.ops.Resize(
             device="cpu",

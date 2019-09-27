@@ -38,7 +38,7 @@ class DALICOCODetection(object):
             shuffle_after_epoch=True,
             save_img_ids=True)
 
-        self.decode = dali.ops.HostDecoder(device="cpu", output_type=dali.types.RGB)
+        self.decode = dali.ops.ImageDecoder(device="cpu", output_type=dali.types.RGB)
 
         # We need to build the COCOReader ops to parse the annotations
         # and have acces to the dataset size.
@@ -98,7 +98,7 @@ class SSDTrainPipeline(Pipeline):
             shuffle_after_epoch=True,
             save_img_ids=True)
 
-        self.decode = dali.ops.HostDecoder(device="cpu", output_type=dali.types.RGB)
+        self.decode = dali.ops.ImageDecoder(device="cpu", output_type=dali.types.RGB)
 
         # Augumentation techniques
         self.crop = dali.ops.RandomBBoxCrop(
