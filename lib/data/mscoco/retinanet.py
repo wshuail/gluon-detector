@@ -32,7 +32,7 @@ class RetinaNetTrainPipeline(Pipeline):
             shuffle_after_epoch=True,
             save_img_ids=True)
 
-        self.decode = dali.ops.ImageDecoder(device="cpu", output_type=dali.types.RGB)
+        self.decode = dali.ops.ImageDecoder(device="mixed", output_type=dali.types.RGB)
 
         # Augumentation techniques
         self.crop = dali.ops.RandomBBoxCrop(
@@ -43,16 +43,13 @@ class RetinaNetTrainPipeline(Pipeline):
             ltrb=True,
             allow_no_crop=True,
             num_attempts=1)
-        self.slice = dali.ops.Slice(device="cpu")
+        self.slice = dali.ops.Slice(device="gpu")
         self.twist = dali.ops.ColorTwist(device="gpu")
         self.resize = dali.ops.Resize(
-            device="cpu",
+            device="gpu",
             resize_x=data_shape,
             resize_y=data_shape,
             min_filter=dali.types.DALIInterpType.INTERP_TRIANGULAR)
-
-        # output_dtype = types.FLOAT16 if args.fp16 else types.FLOAT
-        output_dtype = dali.types.FLOAT
 
         self.normalize = dali.ops.CropMirrorNormalize(
             device="gpu",
@@ -60,7 +57,7 @@ class RetinaNetTrainPipeline(Pipeline):
             mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
             std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
             mirror=0,
-            output_dtype=output_dtype,
+            output_dtype=dali.types.FLOAT,
             output_layout=dali.types.NCHW,
             pad_output=False)
 
@@ -69,7 +66,7 @@ class RetinaNetTrainPipeline(Pipeline):
         self.rng2 = dali.ops.Uniform(range=[0.875, 1.125])
         self.rng3 = dali.ops.Uniform(range=[-0.5, 0.5])
 
-        self.flip = dali.ops.Flip(device="cpu")
+        self.flip = dali.ops.Flip(device="gpu")
         self.bbflip = dali.ops.BbFlip(device="cpu", ltrb=True)
         self.flip_coin = dali.ops.CoinFlip(probability=0.5)
 
@@ -145,7 +142,6 @@ class RetinaNetTrainPipeline(Pipeline):
         images = self.flip(images, horizontal=coin_rnd)
         bboxes = self.bbflip(bboxes, horizontal=coin_rnd)
         images = self.resize(images)
-        images = images.gpu()
         images = self.twist(
             images,
             saturation=saturation,

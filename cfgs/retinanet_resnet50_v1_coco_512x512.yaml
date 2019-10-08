@@ -20,4 +20,4 @@ save_frequent: 2
 network: 'resnet50_v1'
 layers: ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']
 
-save_prefix: '/world/data-gpu-107/wangshuailong/experiments/tmp/'
+save_prefix: '~/gluon_detector/output'
