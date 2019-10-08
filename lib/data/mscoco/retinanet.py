@@ -5,6 +5,7 @@ import sys
 import numpy as np
 sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 import mxnet as mx
+from mxnet import nd
 from nvidia import dali
 from nvidia.dali.pipeline import Pipeline
 from nvidia.dali.plugin.mxnet import feed_ndarray
@@ -87,6 +88,9 @@ class RetinaNetTrainPipeline(Pipeline):
             offset=True,
             stds=[0.1, 0.1, 0.2, 0.2],
             scale=data_shape)
+        
+        self.cast = dali.ops.Cast(
+            dtype = dali.types.FLOAT)
 
         # We need to build the COCOReader ops to parse the annotations
         # and have acces to the dataset size.
@@ -151,6 +155,8 @@ class RetinaNetTrainPipeline(Pipeline):
         images = self.normalize(images)
         bboxes_1, labels_1 = self.box_encoder_0_5(bboxes, labels)
         bboxes_2, labels_2 = self.box_encoder_0_4(bboxes, labels)
+        labels_1 = self.cast(labels_1)
+        labels_2 = self.cast(labels_2)
 
         return (images, bboxes_1.gpu(), labels_1.gpu(), bboxes_2.gpu(), labels_2.gpu(), img_ids.gpu())
 
@@ -177,40 +183,53 @@ class RetinaNetTrainLoader(object):
             self.reset()
             raise StopIteration
         
-        batch_data = []
-        batch_img_ids = []
-        batch_origin_gtbox = []
+        images = []
+        box_targets = []
+        cls_targets_1 = []
+        cls_targets_2 = []
         for idx, pipe in enumerate(self.pipelines):
             ctx = mx.gpu(idx)
-            batch_images, batch_bboxes, batch_labels_1, _, batch_labels_2, batch_img_ids = pipe.run()
-            for i in range(self.batch_size):
-                image_tensor = batch_images.at(i)
-                image = mx.nd.zeros(image_tensor.shape(), ctx=ctx, dtype=np.dtype(image_tensor.dtype()))
-                feed_ndarray(image_tensor, image)
-                
-                bboxes_tensor = batch_bboxes.at(i)
-                bboxes = mx.nd.zeros(bboxes_tensor.shape(), ctx=ctx, dtype=np.dtype(bboxes_tensor.dtype()))
-                feed_ndarray(bboxes_tensor, bboxes)
-                
-                labels_1_tensor = batch_labels_1.at(i)
-                labels_1 = mx.nd.zeros(labels_1_tensor.shape(), ctx=ctx, dtype=np.dtype(labels_1_tensor.dtype()))
-                feed_ndarray(labels_1_tensor, labels_1)
-                
-                labels_2_tensor = batch_labels_2.at(i)
-                labels_2 = mx.nd.zeros(labels_2_tensor.shape(), ctx=ctx, dtype=np.dtype(labels_2_tensor.dtype()))
-                feed_ndarray(labels_2_tensor, labels_2)
-                
-                print ('image shape: {}'.format(image.shape))
-                print ('bboxes shape: {}'.format(bboxes.shape))
-                print ('labels_1 shape: {}'.format(labels_1.shape))
-                print ('labels_2 shape: {}'.format(labels_2.shape))
+            batch_images, batch_box_targets, batch_cls_taregts_1, _, batch_cls_targets_2, batch_img_ids = pipe.run()
             
+            batch_images = self.feed_tensor_into_mx(batch_images, ctx)
+            batch_box_targets = self.feed_tensor_into_mx(batch_box_targets, ctx)
+            batch_cls_taregts_1 = self.feed_tensor_into_mx(batch_cls_taregts_1, ctx)
+            batch_cls_targets_2 = self.feed_tensor_into_mx(batch_cls_targets_2, ctx)
+
+            images.append(batch_images)
+            box_targets.append(batch_box_targets)
+            cls_targets_1.append(batch_cls_taregts_1)
+            cls_targets_2.append(batch_cls_targets_2)
+
+            # print ('batch_images: {}'.format(batch_images.shape))
+            # print ('batch_box_targets: {}'.format(batch_box_targets.shape))
+            # print ('batch_cls_taregts_1: {}'.format(batch_cls_taregts_1.shape))
+            # print ('batch_cls_targets_2: {}'.format(batch_cls_targets_2.shape))
         
+        cls_targets = self.get_cls_targets(cls_targets_1, cls_targets_2)
         
         self.count += self.num_worker * self.batch_size
         
-        return batch_data, batch_img_ids, batch_origin_gtbox
-        
+        return images, box_targets, cls_targets
+    
+    def feed_tensor_into_mx(self, pipe_out, ctx):
+        if pipe_out.is_dense_tensor():
+            pipe_out_tensor = pipe_out.as_tensor()
+            dtype = np.dtype(pipe_out_tensor.dtype())
+            batch_data = mx.nd.zeros(pipe_out_tensor.shape(), ctx=ctx, dtype=dtype)
+            feed_ndarray(pipe_out_tensor, batch_data)
+            # batch_data = [batch_data[i, :, :, :] for i in range(batch_data.shape[0])]
+        else:
+            raise NotImplementedError ('pipe out should be dense_tensor now.')
+            batch_data = []
+            for i in range(self.batch_size):
+                data_tensor = pipe_out.at(i)
+                dtype = np.dtype(data_tensor.dtype())
+                img = mx.nd.zeros(data_tensor.shape(), ctx=ctx, dtype=dtype)
+                feed_ndarray(data_tensor, img)
+                batch_data.append(img)
+        return batch_data
+
     def next(self):
         return self.__next__()
     
@@ -221,6 +240,19 @@ class RetinaNetTrainLoader(object):
         for pipe in self.pipelines:
             pipe.reset()
         self.count = 0
+    
+    @staticmethod
+    def get_cls_targets(cls_targets_1, cls_targets_2):
+        cls_targets = []
+        for (cls_target_1, cls_target_2) in zip(cls_targets_1, cls_targets_2):
+            cls_target_1_idx = nd.where(cls_target_1 > 0, nd.ones_like(cls_target_1), nd.zeros_like(cls_target_1))
+            cls_target_2_idx = nd.where(cls_target_2 > 0, nd.ones_like(cls_target_2), nd.zeros_like(cls_target_2))
+            cls_target_idx = nd.where(cls_target_1_idx == cls_target_2_idx, nd.ones_like(cls_target_1_idx),\
+                                      nd.zeros_like(cls_target_1_idx))
+            cls_target = nd.where(cls_target_idx, cls_target_1, nd.ones_like(cls_target_1)*-1)
+            cls_targets.append(cls_target)
+        return cls_targets
+
 
 
 if __name__ == '__main__':
@@ -240,6 +272,13 @@ if __name__ == '__main__':
                                         num_workers=16) for i in range(num_devices)]
     data_loader = RetinaNetTrainLoader(train_pipelines)
     for data_batch in iter(data_loader):
-        print ('xx')
+        images, box_targets, cls_targets = data_batch
+        for x, box_target, cls_target in zip(images, box_targets, cls_targets):
+            print ('x shape: {}'.format(x.shape))
+            print ('x dtype: {}'.format(x.dtype))
+            print ('box_target shape: {}'.format(box_target.shape))
+            print ('box_target dtype: {}'.format(box_target.dtype))
+            print ('cls_target shape: {}'.format(cls_target.shape))
+            print ('cls_target dtype: {}'.format(cls_target.dtype))
 
  

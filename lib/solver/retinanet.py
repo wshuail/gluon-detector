@@ -19,7 +19,7 @@ from lib.utils.export_helper import export_block
 from lib.cus_loss.retinanet import FocalLoss, HuberLoss
 from lib.modelzoo.retinanet import RetinaNet
 from lib.anchor.retinanet import generate_retinanet_anchors
-from lib.data.mscoco.retinanet import RetinaNetTrainPipeline
+from lib.data.mscoco.retinanet import RetinaNetTrainPipeline, RetinaNetTrainLoader
 from lib.data.mscoco.detection import ValPipeline
 from lib.data.mscoco.detection import ValLoader
 from lib.metrics.coco_detection import COCODetectionMetric
@@ -102,15 +102,8 @@ class RetinaNetSolver(object):
                                             device_id=i,
                                             anchors=self.anchors,
                                             num_workers=16) for i in range(num_devices)]
-        epoch_size = train_pipelines[0].size()
-        train_loader = DALIGenericIterator(train_pipelines, [('data', DALIGenericIterator.DATA_TAG),
-                                                             ('bboxes_1', DALIGenericIterator.LABEL_TAG),
-                                                             ('label_1', DALIGenericIterator.LABEL_TAG),
-                                                             ('bboxes_2', DALIGenericIterator.LABEL_TAG),
-                                                             ('label_2', DALIGenericIterator.LABEL_TAG),
-                                                             ('img_ids', DALIGenericIterator.LABEL_TAG)],
-                                           epoch_size, auto_reset=True)
-
+        train_loader = RetinaNetTrainLoader(train_pipelines)
+        
         print ("val dataloder")
         val_pipelines = [ValPipeline(split=self.val_split, batch_size=thread_batch_size,
                                      data_shape=self.input_shape[0], num_shards=num_devices,
@@ -131,19 +124,6 @@ class RetinaNetSolver(object):
                                          cleanup=True,
                                          data_shape=self.input_shape)
         return val_metric
-    
-    @staticmethod
-    def get_cls_targets(cls_targets_1, cls_targets_2):
-        cls_targets = []
-        for (cls_target_1, cls_target_2) in zip(cls_targets_1, cls_targets_2):
-            cls_target_1_idx = nd.where(cls_target_1 > 0, nd.ones_like(cls_target_1), nd.zeros_like(cls_target_1))
-            cls_target_2_idx = nd.where(cls_target_2 > 0, nd.ones_like(cls_target_2), nd.zeros_like(cls_target_2))
-            cls_target_idx = nd.where(cls_target_1_idx == cls_target_2_idx, nd.ones_like(cls_target_1_idx),\
-                                      nd.zeros_like(cls_target_1_idx))
-            cls_target = nd.where(cls_target_idx, cls_target_1, nd.ones_like(cls_target_1)*-1)
-            cls_targets.append(cls_target)
-        return cls_targets
-
     
     def train(self):
 
@@ -185,13 +165,7 @@ class RetinaNetSolver(object):
             self.net.collect_params().reset_ctx(self.ctx)
             self.net.hybridize(static_alloc=True, static_shape=True)
             for i, batch in enumerate(self.train_data):
-                data = [d.data[0] for d in batch]
-                box_targets = [d.label[0] for d in batch]
-                cls_targets_1 = [nd.cast(d.label[1], dtype='float32') for d in batch]
-                # box_targets_2 = [d.label[2] for d in batch]
-                cls_targets_2 = [nd.cast(d.label[3], dtype='float32') for d in batch]
-
-                cls_targets = self.get_cls_targets(cls_targets_1, cls_targets_2)
+                data, box_targets, cls_targets = batch
                 
                 with autograd.record():
                     cls_preds = []

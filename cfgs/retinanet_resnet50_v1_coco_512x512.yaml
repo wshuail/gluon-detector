@@ -9,11 +9,11 @@ input_shape: [512, 512]
 batch_size: 16
 
 optimizer: 'sgd'
-lr: 0.0001
+lr: 0.001
 wd: 0.0005
 momentum: 0.9
 gpus: 0,1,2,3
-epoch: 10
+epoch: 100
 use_amp: False
 save_frequent: 2
 
