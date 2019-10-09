@@ -153,8 +153,10 @@ class RetinaNetTrainPipeline(Pipeline):
         bboxes_2, labels_2 = self.box_encoder_0_4(bboxes, labels)
         labels_1 = self.cast(labels_1)
         labels_2 = self.cast(labels_2)
+        labels = self.cast(labels)
 
-        return (images, bboxes_1.gpu(), labels_1.gpu(), bboxes_2.gpu(), labels_2.gpu(), img_ids.gpu())
+        return (images, bboxes.gpu(), labels.gpu(), bboxes_1.gpu(), labels_1.gpu(), bboxes_2.gpu(), labels_2.gpu(), img_ids.gpu())
+        # return images, bboxes.gpu(), labels.gpu(), img_ids.gpu()
 
     def size(self):
         """Returns size of COCO dataset
@@ -163,9 +165,14 @@ class RetinaNetTrainPipeline(Pipeline):
 
 
 class RetinaNetTrainLoader(object):
-    def __init__(self, pipelines):
+    def __init__(self, pipelines, anchors, stds=(0.1, 0.1, 0.2, 0.2),
+                 means=(0., 0., 0., 0.), **kwargs):
         self.pipelines = pipelines
+        anchors = self._xywh_to_normalized_ltrb(anchors, size=512)
+        self._stds = stds
+        self._means = means
         self.num_worker = len(pipelines)
+        self.anchors_list = [anchors.as_in_context(mx.gpu(i)) for i in range(self.num_worker)]
         self.size = pipelines[0].size()
         self.batch_size = pipelines[0].batch_size
         for pipeline in self.pipelines:
@@ -181,49 +188,126 @@ class RetinaNetTrainLoader(object):
         
         images = []
         box_targets = []
-        cls_targets_1 = []
-        cls_targets_2 = []
+        cls_targets = []
         for idx, pipe in enumerate(self.pipelines):
             ctx = mx.gpu(idx)
-            batch_images, batch_box_targets, batch_cls_taregts_1, _, batch_cls_targets_2, batch_img_ids = pipe.run()
-            
+            anchors = self.anchors_list[idx]
+            batch_images, batch_bboxes, batch_labels, batch_bboxes_1, batch_labels_1, bboxes_2, labels_2, batch_img_ids = pipe.run()
             batch_images = self.feed_tensor_into_mx(batch_images, ctx)
-            batch_box_targets = self.feed_tensor_into_mx(batch_box_targets, ctx)
-            batch_cls_taregts_1 = self.feed_tensor_into_mx(batch_cls_taregts_1, ctx)
-            batch_cls_targets_2 = self.feed_tensor_into_mx(batch_cls_targets_2, ctx)
+            batch_box_targets, batch_cls_targets = [], []
+            for i in range(self.batch_size):
+                bboxes = batch_bboxes.at(i)
+                bboxes = self.feed_tensor_into_mx(bboxes, ctx)
+                # print ('bboxes: {}'.format(bboxes*512))
+                labels = batch_labels.at(i)
+                labels = self.feed_tensor_into_mx(labels, ctx)
+                
+                box_ious = nd.contrib.box_iou(anchors, bboxes, format='corner')
+                ious, indices = nd.topk(box_ious, axis=-1, ret_typ='both', k=1)
+
+                box_target_1 = nd.take(bboxes, indices).reshape((-1, 4))
+                box_target = self.encode_box_target(box_target_1*512, anchors*512)
+                if False:
+                    box_target_np = box_target.asnumpy()
+                    index = (ious.asnumpy()>0.5)
+                    pos_box_target_np = box_target_np[index.flatten(), :]
+                    # print ('pos_box_target_np: {}'.format(pos_box_target_np))
+
+                    box_target_1 = box_target_1*512
+                    box_target_1_np = box_target_1.asnumpy()
+                    pos_box_target_1_np = box_target_1_np[index.flatten(), :]
+                    print ('pos_box_target_1_np: {}'.format(pos_box_target_1_np))
+
+                    anchors_1 = anchors*512
+                    anchors_1_np = anchors_1.asnumpy()
+                    pos_anchors_1_np = anchors_1_np[index.flatten(), :]
+                    print ('pos_anchors_1_np: {}'.format(pos_anchors_1_np))
+
+                cls_target = nd.take(labels, indices).reshape((-1, 1))
+     
+                mask = nd.ones_like(ious)*-1
+                mask = nd.where(ious<0.4, nd.zeros_like(ious), mask)
+                mask = nd.where(ious>0.5, nd.ones_like(ious), mask)
+
+                box_mask = nd.tile(mask, reps=(1, 4))
+                box_target = nd.where(box_mask, box_target, nd.zeros_like(box_target))
+                batch_box_targets.append(box_target)
+
+                cls_target = nd.where(mask == 1.0, cls_target, mask)
+                batch_cls_targets.append(cls_target)
+
+                """
+                bboxes_1 = batch_bboxes_1.at(i)
+                bboxes_1 = self.feed_tensor_into_mx(bboxes_1, ctx)
+                if False:
+                    bboxes_1 = bboxes_1.asnumpy()
+                    index = (np.sum(bboxes_1, axis=-1) != 0)
+                    pos_bboxes_1 = bboxes_1[index, :]
+                    print ('mean bboxes_1: {}'.format(np.mean(pos_bboxes_1)))
+                    print ('pos_bboxes_1: {}'.format(pos_bboxes_1))
+                labels_1 = batch_labels_1.at(i)
+                labels_1 = self.feed_tensor_into_mx(labels_1, ctx)
+                if False:
+                    labels_1_np = labels_1.asnumpy()
+                    index = (labels_1_np > 0)
+                    pos_labels_1 = labels_1_np[index]
+                    print ('pos_labels_1: {}'.format(pos_labels_1))
+
+                    cls_target_np = cls_target.asnumpy()
+                    index = (cls_target_np>0)
+                    pos_cls_target = cls_target_np[index]
+                    print ('pos_cls_target: {}'.format(pos_cls_target))
+                """
+
+            batch_box_targets = [nd.expand_dims(box_target, axis=0) for box_target in batch_box_targets]
+            batch_cls_targets = [nd.expand_dims(cls_target, axis=0) for cls_target in batch_cls_targets]
+
+            batch_box_targets = nd.concat(*batch_box_targets, dim=0)
+            batch_cls_targets = nd.concat(*batch_cls_targets, dim=0).squeeze()
+            # print ('batch_box_targets shape: {}'.format(batch_box_targets.shape))
+            # print ('batch_cls_targets shape: {}'.format(batch_cls_targets.shape))
 
             images.append(batch_images)
             box_targets.append(batch_box_targets)
-            cls_targets_1.append(batch_cls_taregts_1)
-            cls_targets_2.append(batch_cls_targets_2)
+            cls_targets.append(batch_cls_targets)
 
-            # print ('batch_images: {}'.format(batch_images.shape))
-            # print ('batch_box_targets: {}'.format(batch_box_targets.shape))
-            # print ('batch_cls_taregts_1: {}'.format(batch_cls_taregts_1.shape))
-            # print ('batch_cls_targets_2: {}'.format(batch_cls_targets_2.shape))
-        
-        cls_targets = self.get_cls_targets(cls_targets_1, cls_targets_2)
-        
         self.count += self.num_worker * self.batch_size
         
         return images, box_targets, cls_targets
+
+    def encode_box_target(self, box_targets, anchors):
+        g = nd.split(box_targets, num_outputs=4, axis=-1)
+        a = nd.split(anchors, num_outputs=4, axis=-1)
+        t0 = ((g[0] - a[0]) / a[2] - self._means[0]) / self._stds[0]
+        t1 = ((g[1] - a[1]) / a[3] - self._means[1]) / self._stds[1]
+        t2 = (nd.log(g[2] / a[2]) - self._means[2]) / self._stds[2]
+        t3 = (nd.log(g[3] / a[3]) - self._means[3]) / self._stds[3]
+        box_targets = nd.concat(t0, t1, t2, t3, dim=-1)
+        return box_targets
     
     def feed_tensor_into_mx(self, pipe_out, ctx):
-        if pipe_out.is_dense_tensor():
-            pipe_out_tensor = pipe_out.as_tensor()
-            dtype = np.dtype(pipe_out_tensor.dtype())
-            batch_data = mx.nd.zeros(pipe_out_tensor.shape(), ctx=ctx, dtype=dtype)
-            feed_ndarray(pipe_out_tensor, batch_data)
-            # batch_data = [batch_data[i, :, :, :] for i in range(batch_data.shape[0])]
+        if isinstance(pipe_out, dali.backend_impl.TensorListGPU):
+            if pipe_out.is_dense_tensor():
+                pipe_out_tensor = pipe_out.as_tensor()
+                dtype = np.dtype(pipe_out_tensor.dtype())
+                batch_data = mx.nd.zeros(pipe_out_tensor.shape(), ctx=ctx, dtype=dtype)
+                feed_ndarray(pipe_out_tensor, batch_data)
+                # batch_data = [batch_data[i, :, :, :] for i in range(batch_data.shape[0])]
+            else:
+                raise NotImplementedError ('pipe out should be dense_tensor now.')
+                batch_data = []
+                for i in range(self.batch_size):
+                    data_tensor = pipe_out.at(i)
+                    dtype = np.dtype(data_tensor.dtype())
+                    img = mx.nd.zeros(data_tensor.shape(), ctx=ctx, dtype=dtype)
+                    feed_ndarray(data_tensor, img)
+                    batch_data.append(img)
+        elif isinstance(pipe_out, dali.backend_impl.TensorGPU):
+            dtype = np.dtype(pipe_out.dtype())
+            batch_data = mx.nd.zeros(pipe_out.shape(), ctx=ctx, dtype=dtype)
+            feed_ndarray(pipe_out, batch_data)
         else:
-            raise NotImplementedError ('pipe out should be dense_tensor now.')
-            batch_data = []
-            for i in range(self.batch_size):
-                data_tensor = pipe_out.at(i)
-                dtype = np.dtype(data_tensor.dtype())
-                img = mx.nd.zeros(data_tensor.shape(), ctx=ctx, dtype=dtype)
-                feed_ndarray(data_tensor, img)
-                batch_data.append(img)
+            raise NotImplementedError ('pipe out should be TensorListGPU or TensorGPU.')
         return batch_data
 
     def next(self):
@@ -248,6 +332,17 @@ class RetinaNetTrainLoader(object):
             cls_target = nd.where(cls_target_idx, cls_target_1, nd.ones_like(cls_target_1)*-1)
             cls_targets.append(cls_target)
         return cls_targets
+    
+    @staticmethod
+    def _xywh_to_normalized_ltrb(anchors, size):
+        anchors_ltrb = nd.zeros_like(anchors)
+        anchors_ltrb[:, 0] = anchors[:, 0] - 0.5 * anchors[:, 2]
+        anchors_ltrb[:, 1] = anchors[:, 1] - 0.5 * anchors[:, 3]
+        anchors_ltrb[:, 2] = anchors[:, 0] + 0.5 * anchors[:, 2]
+        anchors_ltrb[:, 3] = anchors[:, 1] + 0.5 * anchors[:, 3]
+        anchors_ltrb /= size
+        return anchors_ltrb
+
 
 
 
@@ -266,15 +361,13 @@ if __name__ == '__main__':
                                         device_id=i,
                                         anchors=anchors,
                                         num_workers=16) for i in range(num_devices)]
-    data_loader = RetinaNetTrainLoader(train_pipelines)
+    data_loader = RetinaNetTrainLoader(train_pipelines, anchors)
     for data_batch in iter(data_loader):
         images, box_targets, cls_targets = data_batch
         for x, box_target, cls_target in zip(images, box_targets, cls_targets):
             print ('x shape: {}'.format(x.shape))
-            print ('x dtype: {}'.format(x.dtype))
             print ('box_target shape: {}'.format(box_target.shape))
-            print ('box_target dtype: {}'.format(box_target.dtype))
             print ('cls_target shape: {}'.format(cls_target.shape))
-            print ('cls_target dtype: {}'.format(cls_target.dtype))
+        assert False
 
  

@@ -102,7 +102,7 @@ class RetinaNetSolver(object):
                                             device_id=i,
                                             anchors=self.anchors,
                                             num_workers=16) for i in range(num_devices)]
-        train_loader = RetinaNetTrainLoader(train_pipelines)
+        train_loader = RetinaNetTrainLoader(train_pipelines, self.anchors)
         
         print ("val dataloder")
         val_pipelines = [ValPipeline(split=self.val_split, batch_size=thread_batch_size,
