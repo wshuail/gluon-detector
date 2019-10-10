@@ -168,7 +168,7 @@ class RetinaNetTrainLoader(object):
     def __init__(self, pipelines, anchors, stds=(0.1, 0.1, 0.2, 0.2),
                  means=(0., 0., 0., 0.), **kwargs):
         self.pipelines = pipelines
-        anchors = self._xywh_to_normalized_ltrb(anchors, size=512)
+        # anchors = self._xywh_to_normalized_ltrb(anchors, size=512)
         self._stds = stds
         self._means = means
         self.num_worker = len(pipelines)
@@ -198,30 +198,30 @@ class RetinaNetTrainLoader(object):
             for i in range(self.batch_size):
                 bboxes = batch_bboxes.at(i)
                 bboxes = self.feed_tensor_into_mx(bboxes, ctx)
+                bboxes = self._normalized_ltrb_to_xywh(bboxes, size=512)
                 # print ('bboxes: {}'.format(bboxes*512))
                 labels = batch_labels.at(i)
                 labels = self.feed_tensor_into_mx(labels, ctx)
                 
-                box_ious = nd.contrib.box_iou(anchors, bboxes, format='corner')
+                box_ious = nd.contrib.box_iou(anchors, bboxes, format='center')
                 ious, indices = nd.topk(box_ious, axis=-1, ret_typ='both', k=1)
+                # print ('max ious: {}'.format(nd.max(ious)))
 
-                box_target_1 = nd.take(bboxes, indices).reshape((-1, 4))
-                box_target = self.encode_box_target(box_target_1*512, anchors*512)
+                box_target = nd.take(bboxes, indices).reshape((-1, 4))
+                box_target = self.encode_box_target(box_target, anchors)
                 if False:
                     box_target_np = box_target.asnumpy()
                     index = (ious.asnumpy()>0.5)
                     pos_box_target_np = box_target_np[index.flatten(), :]
-                    # print ('pos_box_target_np: {}'.format(pos_box_target_np))
+                    print ('pos_box_target_np: {}'.format(pos_box_target_np))
 
-                    box_target_1 = box_target_1*512
-                    box_target_1_np = box_target_1.asnumpy()
-                    pos_box_target_1_np = box_target_1_np[index.flatten(), :]
-                    print ('pos_box_target_1_np: {}'.format(pos_box_target_1_np))
+                    box_target_np = box_target.asnumpy()
+                    pos_box_target_np = box_target_np[index.flatten(), :]
+                    # print ('pos_box_target_1_np: {}'.format(pos_box_target_np))
 
-                    anchors_1 = anchors*512
-                    anchors_1_np = anchors_1.asnumpy()
-                    pos_anchors_1_np = anchors_1_np[index.flatten(), :]
-                    print ('pos_anchors_1_np: {}'.format(pos_anchors_1_np))
+                    anchors_np = anchors.asnumpy()
+                    pos_anchors_np = anchors_np[index.flatten(), :]
+                    # print ('pos_anchors_np: {}'.format(pos_anchors_np))
 
                 cls_target = nd.take(labels, indices).reshape((-1, 1))
      
@@ -239,7 +239,7 @@ class RetinaNetTrainLoader(object):
                 """
                 bboxes_1 = batch_bboxes_1.at(i)
                 bboxes_1 = self.feed_tensor_into_mx(bboxes_1, ctx)
-                if False:
+                if True:
                     bboxes_1 = bboxes_1.asnumpy()
                     index = (np.sum(bboxes_1, axis=-1) != 0)
                     pos_bboxes_1 = bboxes_1[index, :]
@@ -247,7 +247,7 @@ class RetinaNetTrainLoader(object):
                     print ('pos_bboxes_1: {}'.format(pos_bboxes_1))
                 labels_1 = batch_labels_1.at(i)
                 labels_1 = self.feed_tensor_into_mx(labels_1, ctx)
-                if False:
+                if True:
                     labels_1_np = labels_1.asnumpy()
                     index = (labels_1_np > 0)
                     pos_labels_1 = labels_1_np[index]
@@ -342,6 +342,16 @@ class RetinaNetTrainLoader(object):
         anchors_ltrb[:, 3] = anchors[:, 1] + 0.5 * anchors[:, 3]
         anchors_ltrb /= size
         return anchors_ltrb
+
+    @staticmethod
+    def _normalized_ltrb_to_xywh(matrix, size):
+        matrix_xywh = nd.zeros_like(matrix)
+        matrix_xywh[:, 0] = (matrix[:, 0] + matrix[:, 2])/2
+        matrix_xywh[:, 1] = (matrix[:, 1] + matrix[:, 3])/2
+        matrix_xywh[:, 2] = matrix[:, 2] - matrix[:, 0]
+        matrix_xywh[:, 3] = matrix[:, 3] - matrix[:, 1]
+        matrix_xywh *= size
+        return matrix_xywh
 
 
 
