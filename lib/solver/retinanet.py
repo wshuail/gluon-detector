@@ -12,17 +12,17 @@ from mxnet import nd
 from mxnet import gluon
 from mxnet import autograd
 from mxnet.contrib import amp
-from nvidia.dali.plugin.mxnet import DALIGenericIterator
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
 from lib.utils.logger import build_logger
 from lib.utils.export_helper import export_block
-from lib.cus_loss.retinanet import FocalLoss, HuberLoss
+from lib.loss import FocalLoss, HuberLoss
 from lib.modelzoo.retinanet import RetinaNet
 from lib.anchor.retinanet import generate_retinanet_anchors
-from lib.data.mscoco.retinanet import RetinaNetTrainPipeline, RetinaNetTrainLoader
-from lib.data.mscoco.detection import ValPipeline
-from lib.data.mscoco.detection import ValLoader
+# from lib.data.mscoco.retinanet import RetinaNetTrainPipeline, RetinaNetTrainLoader
 from lib.metrics.coco_detection import COCODetectionMetric
+from lib.data.mscoco.retina.train import RetinaNetTrainLoader
+from lib.data.mscoco.retina.val import RetinaNetValLoader
+from lib.data.mscoco.retina.val import decode_retinanet_result
 
 
 class RetinaNetSolver(object):
@@ -59,7 +59,6 @@ class RetinaNetSolver(object):
 
         self.save_prefix = save_prefix
 
-        self.anchors = self.get_anchors()
         self.net = self.build_net()
 
         self.train_data, self.val_data = self.get_dataloader()
@@ -80,36 +79,31 @@ class RetinaNetSolver(object):
         logging.info('RetinaNetSolver initialized')
 
     def build_net(self):
-        net = RetinaNet(self.network, self.layers, num_class=80, anchors=self.anchors)
+        net = RetinaNet(self.network, self.layers, num_class=80)
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             net.initialize()
         return net
-
-    def get_anchors(self):
-        anchors = generate_retinanet_anchors(self.input_shape)
-        return anchors
 
     def get_dataloader(self):
         logging.info('getting data loader.')
         num_devices = len(self.ctx)
         thread_batch_size = self.batch_size // num_devices
         print ("train dataloder")
-        train_pipelines = [RetinaNetTrainPipeline(split=self.train_split,
-                                            batch_size=thread_batch_size,
-                                            data_shape=self.input_shape[0],
-                                            num_shards=num_devices,
-                                            device_id=i,
-                                            anchors=self.anchors,
-                                            num_workers=16) for i in range(num_devices)]
-        train_loader = RetinaNetTrainLoader(train_pipelines, self.anchors)
+   
+        train_loader = RetinaNetTrainLoader(split=self.train_split,
+                                            thread_batch_size=thread_batch_size,
+                                            max_size=800,
+                                            resize_shorter=600,
+                                            fix_shape=True)
         
         print ("val dataloder")
-        val_pipelines = [ValPipeline(split=self.val_split, batch_size=thread_batch_size,
-                                     data_shape=self.input_shape[0], num_shards=num_devices,
-                                     device_id=i, num_workers=16) for i in range(num_devices)]
-        epoch_size = val_pipelines[0].size()
-        val_loader = ValLoader(val_pipelines, epoch_size, thread_batch_size, self.input_shape)
+        val_loader = RetinaNetValLoader(split=self.val_split,
+                                        thread_batch_size=thread_batch_size,
+                                        max_size=800,
+                                        resize_shorter=600,
+                                        num_devices=num_devices,
+                                        fix_shape=True)
         print ('load dataloder done')
 
         return train_loader, val_loader
@@ -120,8 +114,8 @@ class RetinaNetSolver(object):
         log_path = os.path.expanduser(os.path.join(self.save_prefix, log_file))
         val_metric = COCODetectionMetric(dataset=self.val_split,
                                          save_prefix=log_path,
-                                         use_time=False,
-                                         cleanup=True,
+                                         use_time=True,
+                                         cleanup=False,
                                          data_shape=self.input_shape)
         return val_metric
     
@@ -164,14 +158,13 @@ class RetinaNetSolver(object):
             # reset cause save params may change
             self.net.collect_params().reset_ctx(self.ctx)
             self.net.hybridize(static_alloc=True, static_shape=True)
-            for i, batch in enumerate(self.train_data):
-                data, box_targets, cls_targets = batch
-                
+            for i, batch in enumerate(iter(self.train_data)):
+                data, box_targets, cls_targets, _, _, _ = batch
                 with autograd.record():
                     cls_preds = []
                     box_preds = []
                     for x in data:
-                        cls_pred, box_pred, _ = self.net(x)
+                        cls_pred, box_pred = self.net(x)
                         cls_preds.append(cls_pred)
                         box_preds.append(box_pred)
                     cls_loss = [cls_criterion(cls_pred, cls_target) for cls_pred, cls_target in
@@ -204,7 +197,49 @@ class RetinaNetSolver(object):
             logging.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
             self.save_params(epoch)
 
+
     def validation(self):
+        self.eval_metric.reset()
+        self.net.hybridize(static_alloc=True, static_shape=True)
+        
+        for i, data_batch in enumerate(self.val_data):
+            batch_data, batch_labels, batch_img_ids = data_batch
+            
+            det_bboxes = []
+            det_ids = []
+            det_scores = []
+            gt_bboxes = []
+            gt_ids = []
+            gt_difficults = []
+            
+            for thread_data, thread_labels, thread_img_ids in zip(batch_data, batch_labels, batch_img_ids):
+                for image, labels, image_id in zip(thread_data, thread_labels, thread_img_ids):
+                    # with autograd.record():
+                    _, c, h, w = image.shape
+                    cls_preds, box_preds = self.net(image)
+                    
+                    anchors = generate_retinanet_anchors((h, w))
+                    anchors = nd.reshape(anchors, (1, -1, 4))
+                    anchors = anchors.as_in_context(image.context)
+        
+                    ids, scores, bboxes = decode_retinanet_result(box_preds, cls_preds, anchors)
+                    det_ids.append(ids)
+                    det_scores.append(scores)
+                    # clip to image size
+                    det_bboxes.append(bboxes)
+                    # det_bboxes.append(bboxes.clip(0, image.shape[2]))
+                    # split ground truths
+                    gt_ids.append(labels.slice_axis(axis=-1, begin=4, end=5))
+                    gt_bboxes.append(labels.slice_axis(axis=-1, begin=0, end=4))
+                    gt_difficults.append(labels.slice_axis(axis=-1, begin=5, end=6) if labels.shape[-1] > 5 else None)
+            
+            self.eval_metric.update(det_bboxes, det_ids, det_scores, batch_img_ids, gt_bboxes, gt_ids, gt_difficults)
+
+        map_name, mean_ap = self.eval_metric.get()
+        
+        return map_name, mean_ap
+
+    def validation2(self):
         self.eval_metric.reset()
         # set nms threshold and topk constraint
         # net.set_nms(nms_thresh=0.45, nms_topk=400)
@@ -244,9 +279,9 @@ class RetinaNetSolver(object):
     def save_params(self, epoch):
         if epoch % self.save_frequent == 0:
             # save parameters
-            # filename = '{}-{:04d}.params'.format(self.output_prefix, model_epoch)
-            # self.net.save_parameters(filename=filename)
-            # logging.info('[Epoch {}] save checkpoint to {}'.format(epoch, filename))
+            filename = '{}-{:04d}.params'.format(self.save_prefix, epoch)
+            self.net.save_parameters(filename=filename)
+            logging.info('[Epoch {}] save checkpoint to {}'.format(epoch, filename))
 
             # export model
             data_shape = (self.height, self.width, 3)

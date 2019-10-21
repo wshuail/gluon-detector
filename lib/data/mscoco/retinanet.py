@@ -189,19 +189,26 @@ class RetinaNetTrainLoader(object):
         images = []
         box_targets = []
         cls_targets = []
+        image_ids = []
+        all_bboxes = []
+        all_labels = []
         for idx, pipe in enumerate(self.pipelines):
             ctx = mx.gpu(idx)
             anchors = self.anchors_list[idx]
-            batch_images, batch_bboxes, batch_labels, batch_bboxes_1, batch_labels_1, bboxes_2, labels_2, batch_img_ids = pipe.run()
+            batch_images, batch_bboxes, batch_labels, batch_bboxes_1, batch_labels_1, bboxes_2, labels_2, batch_image_ids = pipe.run()
             batch_images = self.feed_tensor_into_mx(batch_images, ctx)
+            batch_image_ids = self.feed_tensor_into_mx(batch_image_ids, ctx)
             batch_box_targets, batch_cls_targets = [], []
+            batch_bboxes_, batch_labels_ = [], []
             for i in range(self.batch_size):
                 bboxes = batch_bboxes.at(i)
                 bboxes = self.feed_tensor_into_mx(bboxes, ctx)
                 bboxes = self._normalized_ltrb_to_xywh(bboxes, size=512)
+                batch_bboxes_.append(bboxes)
                 # print ('bboxes: {}'.format(bboxes*512))
                 labels = batch_labels.at(i)
                 labels = self.feed_tensor_into_mx(labels, ctx)
+                batch_labels_.append(labels)
                 
                 box_ious = nd.contrib.box_iou(anchors, bboxes, format='center')
                 ious, indices = nd.topk(box_ious, axis=-1, ret_typ='both', k=1)
@@ -270,10 +277,13 @@ class RetinaNetTrainLoader(object):
             images.append(batch_images)
             box_targets.append(batch_box_targets)
             cls_targets.append(batch_cls_targets)
+            image_ids.append(batch_image_ids)
+            all_bboxes.append(batch_bboxes_)
+            all_labels.append(batch_labels_)
 
         self.count += self.num_worker * self.batch_size
         
-        return images, box_targets, cls_targets
+        return images, box_targets, cls_targets, image_ids, all_bboxes, all_labels
 
     def encode_box_target(self, box_targets, anchors):
         g = nd.split(box_targets, num_outputs=4, axis=-1)
@@ -354,8 +364,6 @@ class RetinaNetTrainLoader(object):
         return matrix_xywh
 
 
-
-
 if __name__ == '__main__':
     sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
     from lib.anchor.retinanet import generate_retinanet_anchors
@@ -372,12 +380,49 @@ if __name__ == '__main__':
                                         anchors=anchors,
                                         num_workers=16) for i in range(num_devices)]
     data_loader = RetinaNetTrainLoader(train_pipelines, anchors)
+    count = 0
+    save_dir = '/world/data-gpu-107/wangshuailong/data/retinanet/loader1'
+    import pickle
     for data_batch in iter(data_loader):
-        images, box_targets, cls_targets = data_batch
-        for x, box_target, cls_target in zip(images, box_targets, cls_targets):
-            print ('x shape: {}'.format(x.shape))
-            print ('box_target shape: {}'.format(box_target.shape))
-            print ('cls_target shape: {}'.format(cls_target.shape))
-        assert False
+        batch_images, batch_box_targets, batch_cls_targets, batch_image_ids, batch_bboxes, batch_labels = data_batch
+        for thread_images, thread_box_targets, thread_cls_targets, thread_image_ids, thread_bboxes, thread_labels in \
+                zip(batch_images, batch_box_targets, batch_cls_targets, batch_image_ids, batch_bboxes, batch_labels):
+            for i in range(thread_images.shape[0]):
+                count += 1
+                image_id = thread_image_ids[i]
+                print ('image_id: {}'.format(image_id))
+                image = thread_images[i, :, :, :]
+                print ('sum image: {}'.format(nd.sum(image)))
+                box_targets = thread_box_targets[i, :, :]
+                print ('sum box_targets: {}'.format(nd.sum(box_targets)))
+                cls_targets = thread_cls_targets[i, :]
+                print ('sum cls_targets: {}'.format(nd.sum(cls_targets)))
+
+                bboxes = thread_bboxes[i]
+                print ('bboxes: {}'.format(bboxes))
+                labels = thread_labels[i]
+                    
+                cls_targets_np = cls_targets.asnumpy()
+                index = (cls_targets_np>0)
+                pos_cls_targets = cls_targets_np[index]
+                print ('pos_cls_targets: {}'.format(pos_cls_targets))
+
+                box_targets_np = box_targets.asnumpy()
+                pos_box_targets = box_targets_np[index.flatten(), :]
+                print ('pos_box_targets: {}'.format(pos_box_targets))
+
+                pickle_name = '{}_{}.pkl'.format(str(int(image_id.asnumpy())), np.random.randint(100))
+                info = {}
+                info['image_id'] = image_id.asnumpy()
+                info['image'] = image.asnumpy()
+                info['box_targets'] = box_targets.asnumpy()
+                info['cls_targets'] = cls_targets.asnumpy()
+                info['bboxes'] = bboxes.asnumpy()
+                info['labels'] = labels.asnumpy()
+                with open(os.path.join(save_dir, pickle_name), 'wb') as f:
+                    pickle.dump(info, f)
+
+    print ('final n: {}'.format(count))
+            
 
  

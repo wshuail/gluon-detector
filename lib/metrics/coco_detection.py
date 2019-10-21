@@ -76,11 +76,11 @@ class COCODetectionMetric(mx.metric.EvalMetric):
             f.close()
 
     def __del__(self):
-        # if self._cleanup:
-        try:
-            os.remove(self._filename)
-        except IOError as err:
-            warnings.warn(str(err))
+        if self._cleanup:
+            try:
+                os.remove(self._filename)
+            except IOError as err:
+                warnings.warn(str(err))
 
     def reset(self):
         self._current_id = 0
@@ -188,7 +188,6 @@ class COCODetectionMetric(mx.metric.EvalMetric):
             elif isinstance(a, mx.nd.NDArray):
                 a = a.asnumpy()
             return a
-
 
         for pred_bbox, pred_label, pred_score, img_id in zip(
                 *[as_numpy(x) for x in [pred_bboxes, pred_labels, pred_scores, img_ids]]):

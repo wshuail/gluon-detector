@@ -6,14 +6,14 @@ train_split: 'train2017'
 val_split: 'val2017'
 
 input_shape: [512, 512]
-batch_size: 16
+batch_size: 8
 
 optimizer: 'sgd'
 lr: 0.001
 wd: 0.0005
 momentum: 0.9
 gpus: 0,1,2,3
-epoch: 100
+epoch: 30
 use_amp: False
 save_frequent: 2
 

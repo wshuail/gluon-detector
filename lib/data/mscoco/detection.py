@@ -100,23 +100,20 @@ class ValPipeline(Pipeline):
             shuffle_after_epoch=False,
             save_img_ids=True)
 
-        self.decode = dali.ops.ImageDecoder(device="cpu", output_type=dali.types.RGB)
+        self.decode = dali.ops.ImageDecoder(device="mixed", output_type=dali.types.RGB)
 
         self.resize = dali.ops.Resize(
-            device="cpu",
+            device="gpu",
             resize_x=data_shape,
             resize_y=data_shape,
             min_filter=dali.types.DALIInterpType.INTERP_TRIANGULAR)
-
-        # output_dtype = types.FLOAT16 if args.fp16 else types.FLOAT
-        output_dtype = dali.types.FLOAT
 
         self.normalize = dali.ops.CropMirrorNormalize(
             device="gpu",
             mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
             std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
             mirror=0,
-            output_dtype=output_dtype,
+            output_dtype=dali.types.FLOAT,
             output_layout=dali.types.NCHW,
             pad_output=False)
 
@@ -148,7 +145,6 @@ class ValPipeline(Pipeline):
         images = self.decode(inputs)
 
         images = self.resize(images)
-        images = images.gpu()
         images = self.normalize(images)
 
         return (images, bboxes.gpu(), labels.gpu(), img_ids.gpu())

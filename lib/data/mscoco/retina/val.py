@@ -1,0 +1,275 @@
+import os
+import sys
+import logging
+logging.basicConfig(level=logging.INFO)
+sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
+import mxnet as mx
+from mxnet import nd
+from nvidia import dali
+from nvidia.dali.pipeline import Pipeline
+from nvidia.dali.plugin.mxnet import feed_ndarray
+import numpy as np
+
+
+def decode_retinanet_result(box_preds, cls_preds, anchors, nms_thresh=0.45,
+                            nms_topk=400, post_nms=100,
+                            stds=(0.1, 0.1, 0.2, 0.2),
+                            means=(0., 0., 0., 0.), **kwargs):
+        a = nd.split(anchors, axis=-1, num_outputs=4)
+        p = nd.split(box_preds, axis=-1, num_outputs=4)
+        ox = nd.broadcast_add(nd.broadcast_mul(p[0] * stds[0] + means[0], a[2]), a[0])
+        oy = nd.broadcast_add(nd.broadcast_mul(p[1] * stds[1] + means[1], a[3]), a[1])
+        tw = nd.broadcast_mul(nd.exp(p[2] * stds[2] + means[2]), a[2])
+        th = nd.broadcast_mul(nd.exp(p[3] * stds[3] + means[3]), a[3])
+
+        xmin = ox - tw/2
+        ymin = oy - th/2
+        xmax = ox + tw/2
+        ymax = oy + th/2
+
+        bboxes = nd.concat(xmin, ymin, xmax, ymax, dim=-1)
+        # print ('bboxes shape: {}'.format(bboxes.shape))
+        
+        
+        cls_ids = nd.argmax(cls_preds, axis=-1, keepdims=True)
+        scores = nd.max(cls_preds, axis=-1, keepdims=True)
+        scores_mask = (scores > 0.05)
+        cls_ids = nd.where(scores_mask, cls_ids, nd.ones_like(cls_ids)*-1)
+        scores = nd.where(scores_mask, scores, nd.zeros_like(scores))
+
+        # (B, N, 6)
+        result = nd.concat(cls_ids, scores, bboxes, dim=-1)
+        # print ('result shape: {}'.format(result.shape))
+
+        if nms_thresh > 0 and nms_thresh < 1:
+            result = nd.contrib.box_nms(
+                result, overlap_thresh=nms_thresh, topk=nms_topk, valid_thresh=0.01,
+                id_index=0, score_index=1, coord_start=2, force_suppress=False)
+            if post_nms > 0:
+                result = result.slice_axis(axis=1, begin=0, end=post_nms)
+        
+        ids = nd.slice_axis(result, axis=2, begin=0, end=1)
+        scores = nd.slice_axis(result, axis=2, begin=1, end=2)
+        bboxes = nd.slice_axis(result, axis=2, begin=2, end=6)
+
+        return ids, scores, bboxes
+
+
+class ValPipeline(Pipeline):
+    def __init__(self, split, batch_size, max_size, resize_shorter, num_shards, device_id, num_workers,
+                 fix_shape=False, root_dir='~/.mxnet/datasets/coco'):
+        super(ValPipeline, self).__init__(
+            batch_size=batch_size,
+            device_id=device_id,
+            num_threads=num_workers)
+        
+        file_root = os.path.expanduser(os.path.join(root_dir, split))
+        anno_file_name = 'instances_{}.json'.format(split)
+        annotations_file = os.path.expanduser(os.path.join(root_dir, 'annotations', anno_file_name))
+        self.input = dali.ops.COCOReader(
+            file_root=file_root,
+            annotations_file=annotations_file,
+            pad_last_batch=False,
+            skip_empty=False,
+            shard_id=device_id,
+            num_shards=num_shards,
+            ratio=True,
+            ltrb=True,
+            shuffle_after_epoch=False,
+            save_img_ids=True)
+
+        self.decode = dali.ops.ImageDecoder(device="mixed", output_type=dali.types.RGB)
+
+        if fix_shape:
+            data_shape = 512
+            self.resize = dali.ops.Resize(
+                device="gpu",
+                resize_x=data_shape,
+                resize_y=data_shape,
+                min_filter=dali.types.DALIInterpType.INTERP_TRIANGULAR)
+        else:
+            self.resize = dali.ops.Resize(
+                device="gpu",
+                max_size=max_size,
+                resize_shorter=resize_shorter,
+                min_filter=dali.types.DALIInterpType.INTERP_TRIANGULAR)
+
+        self.normalize = dali.ops.CropMirrorNormalize(
+            device="gpu",
+            mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
+            std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
+            mirror=0,
+            output_dtype=dali.types.FLOAT,
+            output_layout=dali.types.NCHW,
+            pad_output=False)
+
+        # We need to build the COCOReader ops to parse the annotations
+        # and have acces to the dataset size.
+        # TODO(spanev): Replace by DALI standalone ops when available
+        class DummyMicroPipe(Pipeline):
+            """ Dummy pipeline which sole purpose is to build COCOReader
+            and get the epoch size. To be replaced by DALI standalone op, when available.
+            """
+            def __init__(self):
+                super(DummyMicroPipe, self).__init__(batch_size=1,
+                                                     device_id=0,
+                                                     num_threads=1)
+                self.input = dali.ops.COCOReader(
+                    file_root=file_root,
+                    annotations_file=annotations_file)
+            def define_graph(self):
+                inputs, bboxes, labels = self.input(name="Reader")
+                return (inputs, bboxes, labels)
+
+        micro_pipe = DummyMicroPipe()
+        micro_pipe.build()
+        self._size = micro_pipe.epoch_size(name="Reader")
+        del micro_pipe
+
+    def define_graph(self):
+        inputs, bboxes, labels, img_ids = self.input(name="Reader")
+        images = self.decode(inputs)
+        images = self.resize(images)
+        images = self.normalize(images)
+
+        return (images, bboxes.gpu(), labels.gpu(), img_ids.gpu())
+
+    def size(self):
+        """Returns size of COCO dataset
+        """
+        return self._size
+
+
+class RetinaNetValLoader(object):
+    def __init__(self, split, thread_batch_size, max_size, resize_shorter, num_devices, fix_shape=False):
+        pipelines = [ValPipeline(split=split,
+                                 batch_size=thread_batch_size,
+                                 max_size=max_size,
+                                 resize_shorter=resize_shorter,
+                                 num_shards=num_devices,
+                                 device_id=i,
+                                 num_workers=16,
+                                 fix_shape=fix_shape) for i in range(num_devices)]
+        self.pipelines = pipelines
+        self.batch_size = pipelines[0].batch_size
+        self.size = pipelines[0].size()
+        print ('total size {}'.format(self.size))
+        
+        for pipeline in self.pipelines:
+            pipeline.build()
+        
+        self.count = 0
+
+        logging.info('RetinaNetValLoader Initilized.')
+    
+    def __next__(self):
+        
+        if self.count >= self.size:
+            self.reset()
+            raise StopIteration
+        
+        all_data = []
+        all_labels = []
+        all_img_ids = []
+        for idx, pipe in enumerate(self.pipelines):
+            data, bboxes, labels, img_ids = pipe.run()
+            data, labels = self.format_data(data, bboxes, labels, idx)
+            img_ids = [int(img_ids.as_cpu().at(idx)) for idx in range(self.batch_size)]
+            # img_ids = mx.nd.array(img_ids)
+            
+            self.count += len(data)
+            
+            all_data.append(data)
+            all_labels.append(labels)
+            all_img_ids.append(img_ids)
+        
+        return all_data, all_labels, all_img_ids
+
+    def format_data(self, batch_data, batch_bboxes, batch_labels, idx):
+        ctx = mx.gpu(idx)
+        all_images, all_labels = [], []
+        for i in range(self.batch_size):
+            image = batch_data.at(i)
+            image = self.feed_tensor_into_mx(image, ctx)
+            _, height, width = image.shape
+
+            h = height + (32-height%32)%32  # in case max(hs)%32 == 0
+            w = width + (32-width%32)%32
+            pad_h = h - height
+            pad_w = w - width
+            image = nd.expand_dims(image, axis=0)
+            # nd.pad only support 4/5-dimentional data so expand then squeeze
+            image = nd.pad(image, mode='constant', constant_value=0.0,
+                           pad_width=(0, 0, 0, 0, 0, pad_h, 0, pad_w))
+
+            bboxes = batch_bboxes.at(i)
+            labels = batch_labels.at(i)
+            assert isinstance(bboxes, dali.backend_impl.TensorGPU) and \
+                isinstance(bboxes, dali.backend_impl.TensorGPU), \
+                'Expected bboxes and labels are dali.backend_impl.TensorGPU, \
+                but got {} and {}'.format(type(bboxes), type(labels))
+            assert bboxes.shape()[0] == labels.shape()[0]
+            assert bboxes.shape()[1] == 4
+            assert labels.shape()[1] == 1
+            num_gtboxes = bboxes.shape()[0]
+            if num_gtboxes > 0:
+                bboxes = self.feed_tensor_into_mx(bboxes, ctx)
+                bboxes[:, 0] *= width
+                bboxes[:, 1] *= height
+                bboxes[:, 2] *= width
+                bboxes[:, 3] *= height
+                labels = self.feed_tensor_into_mx(labels, ctx)
+            else:
+                bboxes = mx.nd.zeros((1, 4), ctx=ctx)
+                labels = mx.nd.ones((1, 1), ctx=ctx)*-1
+            labels = labels.astype(bboxes.dtype)
+            labels = mx.nd.concat(bboxes, labels, dim=-1)
+            labels = nd.expand_dims(labels, axis=0)
+            all_images.append(image)
+            all_labels.append(labels)
+
+        return all_images, all_labels
+
+    def feed_tensor_into_mx(self, pipe_out, ctx):
+        if isinstance(pipe_out, dali.backend_impl.TensorGPU):
+            dtype = np.dtype(pipe_out.dtype())
+            batch_data = mx.nd.zeros(pipe_out.shape(), ctx=ctx, dtype=dtype)
+            feed_ndarray(pipe_out, batch_data)
+        else:
+            raise NotImplementedError ('pipe out should be TensorGPU.')
+        return batch_data
+
+    def next(self):
+        return self.__next__()
+    
+    def __iter__(self):
+        return self
+
+    def reset(self):
+        for pipe in self.pipelines:
+            pipe.reset()
+        self.count = 0
+
+if __name__ == '__main__':
+    val_split = 'val2017'
+    thread_batch_size = 2
+    max_size = 800
+    resize_shorter = 640
+    num_devices = 4
+    val_loader = RetinaNetValLoader(split=val_split, thread_batch_size=thread_batch_size,
+                                    max_size=max_size, resize_shorter=resize_shorter,
+                                    num_devices=num_devices, fix_shape=True)
+    n = 0
+    for data_batch in val_loader:
+        batch_data, batch_labels, batch_img_ids = data_batch
+        print ('image_ids : {}'.format(batch_img_ids))
+        for thread_image, thread_labels in zip(batch_data, batch_labels):
+            for image, labels in zip(thread_image, thread_labels):
+                print ('image shape: {}'.format(image.shape))
+                print ('labels shape: {}'.format(labels.shape))
+                n += image.shape[0]
+    print ('final n: {}'.format(n))
+
+
+
+
