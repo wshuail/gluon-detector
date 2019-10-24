@@ -15,6 +15,7 @@ from nvidia.dali.pipeline import Pipeline
 from nvidia.dali.plugin.mxnet import feed_ndarray
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
 from lib.anchor.retinanet import generate_retinanet_anchors
+from code import encode_box_target
 
 
 class AspectRatioBasedSampler(object):
@@ -308,17 +309,17 @@ class TrainPipeline(Pipeline):
 
 class RetinaNetTrainLoader(object):
     def __init__(self, split, thread_batch_size, max_size, resize_shorter,
-                 num_devices=4, stds=(0.1, 0.1, 0.2, 0.2), means=(0., 0., 0., 0.),
+                 num_devices=4, means=(0., 0., 0., 0.), stds=(0.1, 0.1, 0.2, 0.2),
                  fix_shape=False, **kwargs):
         sampler = AspectRatioBasedSampler(split=split, thread_batch_size=thread_batch_size)
         pipes = [TrainPipeline(sampler, batch_size=thread_batch_size, max_size=max_size,
-                               resize_shorter=resize_shorter, fix_shape=fix_shape, num_threads=2,
+                               resize_shorter=resize_shorter, fix_shape=fix_shape, num_threads=4,
                                thread_id=i, device_id=i) for i in range(num_devices)]
         self.pipelines = pipes
         self.max_size = max_size
         self.resize_shorter = resize_shorter
-        self._stds = stds
-        self._means = means
+        self._code_stds = stds
+        self._code_means = means
         self.fix_shape = fix_shape
         self.num_worker = num_devices
         self._size = self.pipelines[0].size()
@@ -330,10 +331,10 @@ class RetinaNetTrainLoader(object):
         self.anchors_pool = {}
         self.count = 0
         
-        self.mean = nd.array([0.485 * 255, 0.456 * 255, 0.406 * 255]).reshape(1, -1, 1, 1)
-        self.std = nd.array([0.229 * 255, 0.224 * 255, 0.225 * 255]).reshape(1, -1, 1, 1)
-        self.mean_list = [self.mean.as_in_context(mx.gpu(i)) for i in range(num_devices)]
-        self.std_list = [self.std.as_in_context(mx.gpu(i)) for i in range(num_devices)]
+        self.means = nd.array([0.485 * 255, 0.456 * 255, 0.406 * 255]).reshape(1, -1, 1, 1)
+        self.stds = nd.array([0.229 * 255, 0.224 * 255, 0.225 * 255]).reshape(1, -1, 1, 1)
+        self.means_list = [self.means.as_in_context(mx.gpu(i)) for i in range(num_devices)]
+        self.stds_list = [self.stds.as_in_context(mx.gpu(i)) for i in range(num_devices)]
         
     def __next__(self):
         if self.count >= self._size:
@@ -400,9 +401,9 @@ class RetinaNetTrainLoader(object):
             batch_images = [nd.pad(image, mode='constant', constant_value=0.0,
                                    pad_width=(0, 0, 0, 0, 0, pad_h, 0, pad_w))
                             for image, pad_h, pad_w in zip(batch_images, pad_hs, pad_ws)] 
-            self.mean = self.mean_list[idx]
-            self.std = self.std_list[idx]
-            batch_images = [(image-self.mean)/self.std for image in batch_images]
+            self.means = self.means_list[idx]
+            self.stds = self.stds_list[idx]
+            batch_images = [(image-self.means)/self.stds for image in batch_images]
             
             # no need to generate anchors each time
             anchors_name = '{}_{}_{}'.format(image_h, image_w, idx)
@@ -414,10 +415,6 @@ class RetinaNetTrainLoader(object):
                 self.anchors_pool[anchors_name] = anchors
 
             for i in range(self.batch_size):
-                image = batch_images[i]
-                # c, h, w = image.shape
-                # print ('image 2 shape: {}'.format(image.shape))
-
                 bboxes = batch_xywh_bboxes[i]
                 cls_ids = batch_cls_ids[i]
                 
@@ -426,7 +423,7 @@ class RetinaNetTrainLoader(object):
                 # print ('max ious: {}'.format(nd.max(ious)))
 
                 box_target = nd.take(bboxes, indices).reshape((-1, 4))
-                box_target = self.encode_box_target(box_target, anchors)
+                box_target = encode_box_target(box_target, anchors, self._code_means, self._code_stds)
                 
                 cls_target = nd.take(cls_ids, indices).reshape((-1, 1))
      
@@ -447,8 +444,6 @@ class RetinaNetTrainLoader(object):
             batch_images = nd.concat(*batch_images, dim=0)
             batch_box_targets = nd.concat(*batch_box_targets, dim=0)
             batch_cls_targets = nd.concat(*batch_cls_targets, dim=0).squeeze()
-            # print ('batch_box_targets shape: {}'.format(batch_box_targets.shape))
-            # print ('batch_cls_targets shape: {}'.format(batch_cls_targets.shape))
 
             images.append(batch_images)
             all_bboxes.append(batch_xywh_bboxes)
@@ -461,34 +456,8 @@ class RetinaNetTrainLoader(object):
         
         return images, box_targets, cls_targets, all_image_ids, all_bboxes, all_labels
 
-    def encode_box_target(self, box_targets, anchors):
-        g = nd.split(box_targets, num_outputs=4, axis=-1)
-        a = nd.split(anchors, num_outputs=4, axis=-1)
-        t0 = ((g[0] - a[0]) / a[2] - self._means[0]) / self._stds[0]
-        t1 = ((g[1] - a[1]) / a[3] - self._means[1]) / self._stds[1]
-        t2 = (nd.log(g[2] / a[2]) - self._means[2]) / self._stds[2]
-        t3 = (nd.log(g[3] / a[3]) - self._means[3]) / self._stds[3]
-        box_targets = nd.concat(t0, t1, t2, t3, dim=-1)
-        return box_targets
-    
     def feed_tensor_into_mx(self, pipe_out, ctx):
-        if isinstance(pipe_out, dali.backend_impl.TensorListGPU):
-            if pipe_out.is_dense_tensor():
-                pipe_out_tensor = pipe_out.as_tensor()
-                dtype = np.dtype(pipe_out_tensor.dtype())
-                batch_data = mx.nd.zeros(pipe_out_tensor.shape(), ctx=ctx, dtype=dtype)
-                feed_ndarray(pipe_out_tensor, batch_data)
-                # batch_data = [batch_data[i, :, :, :] for i in range(batch_data.shape[0])]
-            else:
-                raise NotImplementedError ('pipe out should be dense_tensor now.')
-                batch_data = []
-                for i in range(self.batch_size):
-                    data_tensor = pipe_out.at(i)
-                    dtype = np.dtype(data_tensor.dtype())
-                    img = mx.nd.zeros(data_tensor.shape(), ctx=ctx, dtype=dtype)
-                    feed_ndarray(data_tensor, img)
-                    batch_data.append(img)
-        elif isinstance(pipe_out, dali.backend_impl.TensorGPU):
+        if isinstance(pipe_out, dali.backend_impl.TensorGPU):
             dtype = np.dtype(pipe_out.dtype())
             batch_data = mx.nd.zeros(pipe_out.shape(), ctx=ctx, dtype=dtype)
             feed_ndarray(pipe_out, batch_data)
@@ -546,27 +515,16 @@ if __name__ == '__main__':
                 print ('image shape: {}'.format(image.shape))
 
                 """
-                print ('sum image: {}'.format(nd.sum(image)))
                 box_targets = thread_box_targets[i, :, :]
                 print ('sum box_targets: {}'.format(nd.sum(box_targets)))
                 cls_targets = thread_cls_targets[i, :]
                 print ('sum cls_targets: {}'.format(nd.sum(cls_targets)))
-
                 bboxes = thread_bboxes[i]
                 print ('bboxes: {}'.format(bboxes))
                 labels = thread_labels[i]
-                    
-                cls_targets_np = cls_targets.asnumpy()
-                index = (cls_targets_np>0)
-                pos_cls_targets = cls_targets_np[index]
-                print ('pos_cls_targets: {}'.format(pos_cls_targets))
-
-                box_targets_np = box_targets.asnumpy()
-                pos_box_targets = box_targets_np[index.flatten(), :]
-                print ('pos_box_targets: {}'.format(pos_box_targets))
                 """
-                # if n == 1:
-                #     assert False
+                if n == 200:
+                    assert False
 
 
     print ('final n: {}'.format(n))

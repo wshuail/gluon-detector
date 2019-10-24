@@ -11,11 +11,10 @@ from mxnet import autograd
 from mxnet import gluon
 from mxnet.gluon.block import SymbolBlock
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
-from lib.modelzoo.retinanet import RetinaNet
+from lib.modelzoo import get_model
 from lib.anchor.retinanet import generate_retinanet_anchors
 from lib.data.mscoco.retina.val import RetinaNetValLoader
-from lib.data.mscoco.retina.val import decode_retinanet_result
-# from lib.data.mscoco.detection import ValPipeline, ValLoader
+from lib.data.mscoco.retina.code import decode_retinanet_result
 from lib.metrics.coco_detection import RetinaNetCOCODetectionMetric
 
 
@@ -32,14 +31,12 @@ class Evaluator(object):
         gpu_ids = [int(gpu_id) for gpu_id in gpus.split(',')]
         self.ctx = [mx.gpu(gpu_id) for gpu_id in gpu_ids]
         num_devices = len(self.ctx)
-        symbol_file = params_file[:params_file.rfind('-')] + "-symbol.json"
-        self.net = SymbolBlock.imports(symbol_file, ['data'], params_file, ctx=self.ctx)
-        """
-        layers = ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']
-        self.net = RetinaNet('resnet50_v1', layers, num_class=80)
+        # symbol_file = params_file[:params_file.rfind('-')] + "-symbol.json"
+        # self.net = SymbolBlock.imports(symbol_file, ['data'], params_file, ctx=self.ctx)
+        model_name = 'retinanet_resnet50_v1_coco'
+        self.net = get_model(model_name)
         self.net.load_parameters(params_file)
         self.net.collect_params().reset_ctx(self.ctx)
-        """
         logging.info('network initilized.')
         
         self.val_loader = RetinaNetValLoader(split=split,
@@ -102,8 +99,8 @@ class Evaluator(object):
 
 
 if __name__ == '__main__':
-    params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_512x512-deploy-0000.params'
-    # params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_512x512-0000.params'
+    # params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_512x512-deploy-0000.params'
+    params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_512x512-0010.params'
     evaluator = Evaluator(params_file)
     evaluator.validation()
 

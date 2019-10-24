@@ -2,57 +2,13 @@ import os
 import sys
 import logging
 logging.basicConfig(level=logging.INFO)
+import numpy as np
 sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 import mxnet as mx
 from mxnet import nd
 from nvidia import dali
 from nvidia.dali.pipeline import Pipeline
 from nvidia.dali.plugin.mxnet import feed_ndarray
-import numpy as np
-
-
-def decode_retinanet_result(box_preds, cls_preds, anchors, nms_thresh=0.45,
-                            nms_topk=400, post_nms=100,
-                            stds=(0.1, 0.1, 0.2, 0.2),
-                            means=(0., 0., 0., 0.), **kwargs):
-        a = nd.split(anchors, axis=-1, num_outputs=4)
-        p = nd.split(box_preds, axis=-1, num_outputs=4)
-        ox = nd.broadcast_add(nd.broadcast_mul(p[0] * stds[0] + means[0], a[2]), a[0])
-        oy = nd.broadcast_add(nd.broadcast_mul(p[1] * stds[1] + means[1], a[3]), a[1])
-        tw = nd.broadcast_mul(nd.exp(p[2] * stds[2] + means[2]), a[2])
-        th = nd.broadcast_mul(nd.exp(p[3] * stds[3] + means[3]), a[3])
-
-        xmin = ox - tw/2
-        ymin = oy - th/2
-        xmax = ox + tw/2
-        ymax = oy + th/2
-
-        bboxes = nd.concat(xmin, ymin, xmax, ymax, dim=-1)
-        # print ('bboxes shape: {}'.format(bboxes.shape))
-        
-        
-        cls_ids = nd.argmax(cls_preds, axis=-1, keepdims=True)
-        scores = nd.max(cls_preds, axis=-1, keepdims=True)
-        scores_mask = (scores > 0.05)
-        cls_ids = nd.where(scores_mask, cls_ids, nd.ones_like(cls_ids)*-1)
-        scores = nd.where(scores_mask, scores, nd.zeros_like(scores))
-
-        # (B, N, 6)
-        result = nd.concat(cls_ids, scores, bboxes, dim=-1)
-        # print ('result shape: {}'.format(result.shape))
-
-        if nms_thresh > 0 and nms_thresh < 1:
-            result = nd.contrib.box_nms(
-                result, overlap_thresh=nms_thresh, topk=nms_topk, valid_thresh=0.01,
-                id_index=0, score_index=1, coord_start=2, force_suppress=False)
-            if post_nms > 0:
-                result = result.slice_axis(axis=1, begin=0, end=post_nms)
-        
-        ids = nd.slice_axis(result, axis=2, begin=0, end=1)
-        scores = nd.slice_axis(result, axis=2, begin=1, end=2)
-        bboxes = nd.slice_axis(result, axis=2, begin=2, end=6)
-
-        return ids, scores, bboxes
 
 
 class ValPipeline(Pipeline):
@@ -148,7 +104,7 @@ class RetinaNetValLoader(object):
                                  batch_size=thread_batch_size,
                                  max_size=max_size,
                                  resize_shorter=resize_shorter,
-                                 num_shards=num_devices,
+                                 num_shards=4,
                                  device_id=i,
                                  num_workers=16,
                                  fix_shape=fix_shape) for i in range(num_devices)]
@@ -156,8 +112,8 @@ class RetinaNetValLoader(object):
         self.batch_size = pipelines[0].batch_size
         self.size = pipelines[0].size()
         print ('total size {}'.format(self.size))
-        self.mean = nd.array([0.485 * 255, 0.456 * 255, 0.406 * 255]).reshape(-1, 1, 1)
-        self.std = nd.array([0.229 * 255, 0.224 * 255, 0.225 * 255]).reshape(-1, 1, 1)
+        self.means = nd.array([0.485 * 255, 0.456 * 255, 0.406 * 255]).reshape(-1, 1, 1)
+        self.stds = nd.array([0.229 * 255, 0.224 * 255, 0.225 * 255]).reshape(-1, 1, 1)
         
         for pipeline in self.pipelines:
             pipeline.build()
@@ -216,7 +172,7 @@ class RetinaNetValLoader(object):
             image = nd.pad(image, mode='constant', constant_value=0.0,
                            pad_width=(0, 0, 0, 0, 0, pad_h, 0, pad_w))
             image = nd.squeeze(image)
-            image = ((image - self.mean.as_in_context(image.context))/self.std.as_in_context(image.context))
+            image = ((image - self.means.as_in_context(image.context))/self.stds.as_in_context(image.context))
             image = nd.expand_dims(image, axis=0)
 
             bboxes = batch_bboxes.at(i)

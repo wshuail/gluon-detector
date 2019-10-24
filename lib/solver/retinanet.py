@@ -21,7 +21,7 @@ from lib.anchor.retinanet import generate_retinanet_anchors
 from lib.metrics.coco_detection import RetinaNetCOCODetectionMetric
 from lib.data.mscoco.retina.train import RetinaNetTrainLoader
 from lib.data.mscoco.retina.val import RetinaNetValLoader
-from lib.data.mscoco.retina.val import decode_retinanet_result
+from lib.data.mscoco.retina.code import decode_retinanet_result
 
 
 class RetinaNetSolver(object):
