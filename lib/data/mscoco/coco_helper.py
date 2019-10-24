@@ -23,7 +23,7 @@ class COCOHelper(object):
             img_path = os.path.join(self.image_dir, file_name)
             img_info['height'] = height
             img_info['width'] = width
-            img_info['img_path'] = img_info
+            img_info['img_path'] = img_path
             images_info.append(img_info)
         return images_info
 
@@ -47,9 +47,9 @@ class COCOHelper(object):
 
 
 if __name__ == '__main__':
-    split = 'train2017'
+    split = 'val2017'
     coco = COCOHelper(split)
-    image_ids = [475808]
+    image_ids = [59386]
     images_info = coco.img_id_to_path(image_ids)
     anns = coco.img_id_to_anns(image_ids)
     for image_info, ann in zip(images_info, anns):

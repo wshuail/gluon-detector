@@ -31,15 +31,16 @@ class AspectRatioBasedSampler(object):
         self.image_ids = self.filter_image_id(self.image_ids)
         self.coco_label_to_contiguous_id = {v: (k+1) for k, v in enumerate(self.coco.getCatIds())}
 
-        self.batch_image_ids, self.annotations = self.init_annotations()
-        self.num_batch = len(self.batch_image_ids)
+        self.batch_long_image_ids, self.batch_wide_image_ids, self.annotations = self.init_annotations()
+        self.num_batch = len(self.batch_long_image_ids) + len(self.batch_wide_image_ids)
         print ('num_batch: {}'.format(self.num_batch))
 
         self.reset()
 
     def filter_image_id(self, image_ids):
         logging.info('len of image ids before filter: {}'.format(len(image_ids)))
-        image_ids = [image_id for image_id in image_ids if len(self.coco.getAnnIds(imgIds=image_id, iscrowd=False))>0]
+        # image_ids = [image_id for image_id in image_ids if len(self.coco.getAnnIds(imgIds=image_id, iscrowd=False))>0]
+        image_ids = [image_id for image_id in image_ids if len(self.coco.getAnnIds(imgIds=image_id))>0]
         logging.info('len of image ids after filter: {}'.format(len(image_ids)))
         return image_ids
 
@@ -50,7 +51,24 @@ class AspectRatioBasedSampler(object):
             hw_ratio, image_path, bboxes, labels = self.load_image_info(image_id)
             hw_ratios[image_id] = hw_ratio
             annotations[image_id] = {'image_path': image_path, 'bboxes': bboxes, 'labels': labels}
-        
+
+        wide_items, long_items = {}, {}
+        for k, v in hw_ratios.items():
+            if v >= 1:
+                long_items[k] = v
+            else:
+                wide_items[k] = v
+
+        batch_long_image_ids, num_long_example = self.pad_items_list(long_items)
+        logging.info('len of long image ids: {}'.format(num_long_example))
+        batch_wide_image_ids, num_wide_example = self.pad_items_list(wide_items)
+        logging.info('len of wide image ids: {}'.format(num_wide_example))
+        self._size = num_long_example + num_wide_example
+        logging.info('len of total size for COCO: {}'.format(self._size))
+
+        return batch_long_image_ids, batch_wide_image_ids, annotations
+
+    def pad_items_list(self, hw_ratios):
         hw_ratios = [[k, v] for k, v in hw_ratios.items()]
         if len(hw_ratios)%self.batch_size != 0:
             pad_size = self.batch_size - len(hw_ratios)%self.batch_size
@@ -60,21 +78,24 @@ class AspectRatioBasedSampler(object):
         hw_ratios += pad_items
         hw_ratios = sorted(hw_ratios, key=lambda kv: kv[1])
 
-        # hw_ratios = sorted(hw_ratios.items(), key=lambda kv: kv[1])
         image_ids = [hw_ratio[0] for hw_ratio in hw_ratios]
-        self._size = len(self.image_ids)
-        logging.info('final len of image ids: {}'.format(len(image_ids)))
+        num_example = len(image_ids)
         batch_image_ids = [image_ids[i: (i+self.batch_size)] for i in range(0, len(image_ids), self.batch_size)]
         
-        return batch_image_ids, annotations
+        return batch_image_ids, num_example
     
     def reset(self):
-        random.shuffle(self.batch_image_ids)
-        grouped_batch_image_ids = [[batch_ids[i: i+self.thread_batch_size] for batch_ids in self.batch_image_ids]\
-                                   for i in range(0, self.batch_size, self.thread_batch_size)]
-        assert len(grouped_batch_image_ids) == self.num_devices, 'Expected group of batch_image_ids the same with\
-            num_devices {}, but got {}'.format(self.num_devices, len(grouped_batch_image_ids))
-        self.grouped_batch_image_ids = grouped_batch_image_ids
+        random.shuffle(self.batch_long_image_ids)
+        grouped_batch_long_image_ids = [[batch_ids[i: i+self.thread_batch_size] for batch_ids in \
+                                         self.batch_long_image_ids] for i in \
+                                        range(0, self.batch_size, self.thread_batch_size)]
+        random.shuffle(self.batch_wide_image_ids)
+        grouped_batch_wide_image_ids = [[batch_ids[i: i+self.thread_batch_size] for batch_ids in \
+                                         self.batch_wide_image_ids] for i in \
+                                        range(0, self.batch_size, self.thread_batch_size)]
+        for i in range(self.num_devices):
+            grouped_batch_long_image_ids[i] += grouped_batch_wide_image_ids[i]
+        self.grouped_batch_image_ids = grouped_batch_long_image_ids
         
         self.counter = dict.fromkeys(list(range(self.num_devices)), 0)
 
@@ -95,7 +116,7 @@ class AspectRatioBasedSampler(object):
         thread_counter = self.counter[device_id]
 
         batch_image_ids = self.grouped_batch_image_ids[device_id][thread_counter]
-        # batch_image_ids = [475808, 475808]
+        # batch_image_ids = [94326, 94326]
         batch_data = [self.annotations[image_id] for image_id in batch_image_ids]
         batch_images = [open(image_info['image_path'], 'rb') for image_info in batch_data]
         batch_images = [np.frombuffer(f.read(), dtype = np.uint8) for f in batch_images]
@@ -258,7 +279,7 @@ class TrainPipeline(Pipeline):
             contrast=contrast,
             brightness=brightness,
             hue=hue)
-        images = self.normalize(images)
+        # images = self.normalize(images)
         labels = self.cast(labels)
 
         return images, bboxes.gpu(), labels.gpu(), self.image_ids.gpu()
@@ -289,26 +310,33 @@ class RetinaNetTrainLoader(object):
     def __init__(self, split, thread_batch_size, max_size, resize_shorter,
                  num_devices=4, stds=(0.1, 0.1, 0.2, 0.2), means=(0., 0., 0., 0.),
                  fix_shape=False, **kwargs):
-    
         sampler = AspectRatioBasedSampler(split=split, thread_batch_size=thread_batch_size)
         pipes = [TrainPipeline(sampler, batch_size=thread_batch_size, max_size=max_size,
                                resize_shorter=resize_shorter, fix_shape=fix_shape, num_threads=2,
                                thread_id=i, device_id=i) for i in range(num_devices)]
         self.pipelines = pipes
+        self.max_size = max_size
+        self.resize_shorter = resize_shorter
         self._stds = stds
         self._means = means
+        self.fix_shape = fix_shape
         self.num_worker = num_devices
-        self.size = self.pipelines[0].size()
+        self._size = self.pipelines[0].size()
         self.batch_size = self.pipelines[0].batch_size
-        print ('dataloader size: {}'.format(self.size))
-        print ('dataloader batch_size: {}'.format(self.batch_size))
+        print ('dataloader size: {}, batch_size: {}'.format(self._size, self.batch_size))
         for pipeline in self.pipelines:
             pipeline.build()
         
+        self.anchors_pool = {}
         self.count = 0
-    
+        
+        self.mean = nd.array([0.485 * 255, 0.456 * 255, 0.406 * 255]).reshape(1, -1, 1, 1)
+        self.std = nd.array([0.229 * 255, 0.224 * 255, 0.225 * 255]).reshape(1, -1, 1, 1)
+        self.mean_list = [self.mean.as_in_context(mx.gpu(i)) for i in range(num_devices)]
+        self.std_list = [self.std.as_in_context(mx.gpu(i)) for i in range(num_devices)]
+        
     def __next__(self):
-        if self.count >= self.size:
+        if self.count >= self._size:
             self.reset()
             raise StopIteration
         
@@ -323,21 +351,24 @@ class RetinaNetTrainLoader(object):
             batch_data, batch_bboxes, batch_labels, batch_image_ids = pipe.run()
             batch_images = []
             batch_xywh_bboxes = []
-            batch_labels_ = []
+            batch_cls_ids = []
             batch_image_ids_ = []
             batch_box_targets, batch_cls_targets = [], []
             for i in range(self.batch_size):
                 image = batch_data.at(i)
                 image = self.feed_tensor_into_mx(image, ctx)
+                image = nd.transpose(image, (2, 0, 1)).astype(np.float32)
                 c, h, w = image.shape
-                # hw_ratio = h/w
-                # print ('image shape before pad: {} hw_ratio: {}'.format(image.shape, hw_ratio))
                 batch_images.append(image)
-                
+
                 bboxes = batch_bboxes.at(i)
                 bboxes = self.feed_tensor_into_mx(bboxes, ctx)
                 bboxes = self._normalized_ltrb_to_xywh(bboxes, h, w)
                 batch_xywh_bboxes.append(bboxes)
+                
+                cls_ids = batch_labels.at(i)
+                cls_ids = self.feed_tensor_into_mx(cls_ids, ctx)
+                batch_cls_ids.append(cls_ids)
 
                 image_ids = batch_image_ids.at(i)
                 image_ids = self.feed_tensor_into_mx(image_ids, ctx)
@@ -345,18 +376,42 @@ class RetinaNetTrainLoader(object):
 
             hs = [image.shape[1] for image in batch_images]
             ws = [image.shape[2] for image in batch_images]
-            max_h = max(hs) + (32-max(hs)%32)%32  # in case max(hs)%32 == 0
-            max_w = max(ws) + (32-max(ws)%32)%32
-            pad_hs = [max_h - image.shape[1] for image in batch_images]
-            pad_ws = [max_w - image.shape[2] for image in batch_images]
+
+            if not self.fix_shape:
+                hw_ratio = hs[0]/ws[0]
+                if hw_ratio >= 1:
+                    image_h, image_w = self.max_size, self.resize_shorter
+                    pad_hs = [image_h - image.shape[1] for image in batch_images]
+                    pad_ws = [image_w - image.shape[2] for image in batch_images]
+                else:
+                    image_h, image_w = self.resize_shorter, self.max_size
+                    pad_hs = [image_h - image.shape[1] for image in batch_images]
+                    pad_ws = [image_w - image.shape[2] for image in batch_images]
+            else:
+                max_h = max(hs) + (32-max(hs)%32)%32  # in case max(hs)%32 == 0
+                max_w = max(ws) + (32-max(ws)%32)%32
+                pad_hs = [max_h - image.shape[1] for image in batch_images]
+                pad_ws = [max_w - image.shape[2] for image in batch_images]
+                image_w, image_h = max_w, max_h
+                assert image_w == 512
+                assert image_h == 512
             # nd.pad only support 4/5-dimentional data so expand then squeeze
             batch_images = [nd.expand_dims(image, axis=0) for image in batch_images]
             batch_images = [nd.pad(image, mode='constant', constant_value=0.0,
                                    pad_width=(0, 0, 0, 0, 0, pad_h, 0, pad_w))
                             for image, pad_h, pad_w in zip(batch_images, pad_hs, pad_ws)] 
+            self.mean = self.mean_list[idx]
+            self.std = self.std_list[idx]
+            batch_images = [(image-self.mean)/self.std for image in batch_images]
             
-            anchors = generate_retinanet_anchors(image_shape=(max_h, max_w))
-            anchors = anchors.as_in_context(ctx)
+            # no need to generate anchors each time
+            anchors_name = '{}_{}_{}'.format(image_h, image_w, idx)
+            if anchors_name in self.anchors_pool:
+                anchors = self.anchors_pool[anchors_name]
+            else:
+                anchors = generate_retinanet_anchors(image_shape=(image_h, image_w))
+                anchors = anchors.as_in_context(ctx)
+                self.anchors_pool[anchors_name] = anchors
 
             for i in range(self.batch_size):
                 image = batch_images[i]
@@ -364,13 +419,7 @@ class RetinaNetTrainLoader(object):
                 # print ('image 2 shape: {}'.format(image.shape))
 
                 bboxes = batch_xywh_bboxes[i]
-                # bboxes = batch_bboxes.at(i)
-                # bboxes = self.feed_tensor_into_mx(bboxes, ctx)
-                # bboxes = self._normalized_ltrb_to_xywh(bboxes, size=512)
-                # print ('bboxes: {}'.format(bboxes*512))
-                labels = batch_labels.at(i)
-                labels = self.feed_tensor_into_mx(labels, ctx)
-                batch_labels_.append(labels)
+                cls_ids = batch_cls_ids[i]
                 
                 box_ious = nd.contrib.box_iou(anchors, bboxes, format='center')
                 ious, indices = nd.topk(box_ious, axis=-1, ret_typ='both', k=1)
@@ -379,14 +428,7 @@ class RetinaNetTrainLoader(object):
                 box_target = nd.take(bboxes, indices).reshape((-1, 4))
                 box_target = self.encode_box_target(box_target, anchors)
                 
-                if False:
-                    box_target_np = box_target.asnumpy()
-                    index = (ious.asnumpy()>0.5)
-                    pos_box_target_np = box_target_np[index.flatten(), :]
-                    print ('pos_box_target_np: {}'.format(pos_box_target_np))
-                    print ('sum pos_box_target_np: {}'.format(pos_box_target_np.sum()))
-
-                cls_target = nd.take(labels, indices).reshape((-1, 1))
+                cls_target = nd.take(cls_ids, indices).reshape((-1, 1))
      
                 mask = nd.ones_like(ious)*-1
                 mask = nd.where(ious<0.4, nd.zeros_like(ious), mask)
@@ -399,17 +441,6 @@ class RetinaNetTrainLoader(object):
                 cls_target = nd.where(mask == 1.0, cls_target, mask)
                 batch_cls_targets.append(cls_target)
 
-                if False:
-                    cls_target_np = cls_target.asnumpy()
-                    pos_index = (cls_target_np>0)
-                    pos_cls_target = cls_target_np[pos_index.flatten()]
-                    print ('pos_cls_target: {}'.format(pos_cls_target))
-                    box_target_np = box_target.asnumpy()
-                    pos_box_target = box_target_np[pos_index.flatten(), :]
-                    print ('pos_box_target: {}'.format(pos_box_target))
-                    print ('sum box_target_np: {}'.format(np.sum(box_target_np)))
-                    print ('sum pos_box_target: {}'.format(np.sum(pos_box_target)))
-
             batch_box_targets = [nd.expand_dims(box_target, axis=0) for box_target in batch_box_targets]
             batch_cls_targets = [nd.expand_dims(cls_target, axis=0) for cls_target in batch_cls_targets]
 
@@ -421,7 +452,7 @@ class RetinaNetTrainLoader(object):
 
             images.append(batch_images)
             all_bboxes.append(batch_xywh_bboxes)
-            all_labels.append(batch_labels_)
+            all_labels.append(batch_cls_ids)
             box_targets.append(batch_box_targets)
             cls_targets.append(batch_cls_targets)
             all_image_ids.append(batch_image_ids_)
@@ -491,17 +522,17 @@ class RetinaNetTrainLoader(object):
         
         return matrix_xywh
 
+    def size(self):
+        return self._size
 
 if __name__ == '__main__':
-    train_split = 'train2017'
+    train_split = 'val2017'
     thread_batch_size = 2
     max_size = 1024
     resize_shorter = 640
     data_loader = RetinaNetTrainLoader(split=train_split, thread_batch_size=thread_batch_size,
                                        max_size=max_size, resize_shorter=resize_shorter,
-                                       fix_shape=True)
-    save_dir = '/world/data-gpu-107/wangshuailong/data/retinanet/loader2'
-    import pickle
+                                       fix_shape=False)
     n = 0
     for i, data_batch in enumerate(iter(data_loader)):
         batch_images, batch_box_targets, batch_cls_targets, batch_image_ids, batch_bboxes, batch_labels = data_batch
@@ -512,6 +543,9 @@ if __name__ == '__main__':
                 image_id = thread_image_ids[i]
                 print ('image_id: {}'.format(image_id))
                 image = thread_images[i, :, :, :]
+                print ('image shape: {}'.format(image.shape))
+
+                """
                 print ('sum image: {}'.format(nd.sum(image)))
                 box_targets = thread_box_targets[i, :, :]
                 print ('sum box_targets: {}'.format(nd.sum(box_targets)))
@@ -522,7 +556,6 @@ if __name__ == '__main__':
                 print ('bboxes: {}'.format(bboxes))
                 labels = thread_labels[i]
                     
-                """
                 cls_targets_np = cls_targets.asnumpy()
                 index = (cls_targets_np>0)
                 pos_cls_targets = cls_targets_np[index]
@@ -532,22 +565,8 @@ if __name__ == '__main__':
                 pos_box_targets = box_targets_np[index.flatten(), :]
                 print ('pos_box_targets: {}'.format(pos_box_targets))
                 """
-
-                """
-                pickle_name = '{}_{}.pkl'.format(str(int(image_id.asnumpy())), np.random.randint(100))
-                info = {}
-                info['image_id'] = image_id.asnumpy()
-                info['image'] = image.asnumpy()
-                info['box_targets'] = box_targets.asnumpy()
-                info['cls_targets'] = cls_targets.asnumpy()
-                info['bboxes'] = bboxes.asnumpy()
-                info['labels'] = labels.asnumpy()
-                with open(os.path.join(save_dir, pickle_name), 'wb') as f:
-                    pickle.dump(info, f)
-                """
-
-                if n == 1:
-                    assert False
+                # if n == 1:
+                #     assert False
 
 
     print ('final n: {}'.format(n))

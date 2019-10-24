@@ -130,7 +130,7 @@ class ValPipeline(Pipeline):
         inputs, bboxes, labels, img_ids = self.input(name="Reader")
         images = self.decode(inputs)
         images = self.resize(images)
-        images = self.normalize(images)
+        # images = self.normalize(images)
 
         return (images, bboxes.gpu(), labels.gpu(), img_ids.gpu())
 
@@ -142,6 +142,8 @@ class ValPipeline(Pipeline):
 
 class RetinaNetValLoader(object):
     def __init__(self, split, thread_batch_size, max_size, resize_shorter, num_devices, fix_shape=False):
+        self.max_size = max_size
+        self.resize_shorter = resize_shorter
         pipelines = [ValPipeline(split=split,
                                  batch_size=thread_batch_size,
                                  max_size=max_size,
@@ -154,6 +156,8 @@ class RetinaNetValLoader(object):
         self.batch_size = pipelines[0].batch_size
         self.size = pipelines[0].size()
         print ('total size {}'.format(self.size))
+        self.mean = nd.array([0.485 * 255, 0.456 * 255, 0.406 * 255]).reshape(-1, 1, 1)
+        self.std = nd.array([0.229 * 255, 0.224 * 255, 0.225 * 255]).reshape(-1, 1, 1)
         
         for pipeline in self.pipelines:
             pipeline.build()
@@ -170,37 +174,50 @@ class RetinaNetValLoader(object):
         
         all_data = []
         all_labels = []
+        all_resized_attrs = []
         all_img_ids = []
         for idx, pipe in enumerate(self.pipelines):
             data, bboxes, labels, img_ids = pipe.run()
-            data, labels = self.format_data(data, bboxes, labels, idx)
+            data, labels, resized_attrs = self.format_data(data, bboxes, labels, img_ids, idx)
             img_ids = [int(img_ids.as_cpu().at(idx)) for idx in range(self.batch_size)]
-            # img_ids = mx.nd.array(img_ids)
             
             self.count += len(data)
             
             all_data.append(data)
             all_labels.append(labels)
+            all_resized_attrs.append(resized_attrs)
             all_img_ids.append(img_ids)
         
-        return all_data, all_labels, all_img_ids
+        return all_data, all_labels, all_resized_attrs, all_img_ids
 
-    def format_data(self, batch_data, batch_bboxes, batch_labels, idx):
+    def format_data(self, batch_data, batch_bboxes, batch_labels, batch_image_ids, idx):
         ctx = mx.gpu(idx)
+        # batch_image_ids = batch_image_ids.as_cpu()
         all_images, all_labels = [], []
+        resized_attrs = []
         for i in range(self.batch_size):
+            # image_id = int(batch_image_ids.at(i))
             image = batch_data.at(i)
             image = self.feed_tensor_into_mx(image, ctx)
+            image = nd.transpose(image, (2, 0, 1))
+            image = image.astype(np.float32)
             _, height, width = image.shape
+            resized_attrs.append((height, width))
 
-            h = height + (32-height%32)%32  # in case max(hs)%32 == 0
-            w = width + (32-width%32)%32
-            pad_h = h - height
-            pad_w = w - width
+            hw_ratio = (height/width)
+            if hw_ratio >= 1:
+                image_h, image_w = self.max_size, self.resize_shorter
+            else:
+                image_h, image_w = self.resize_shorter, self.max_size
+            pad_h = image_h - height
+            pad_w = image_w - width
             image = nd.expand_dims(image, axis=0)
             # nd.pad only support 4/5-dimentional data so expand then squeeze
             image = nd.pad(image, mode='constant', constant_value=0.0,
                            pad_width=(0, 0, 0, 0, 0, pad_h, 0, pad_w))
+            image = nd.squeeze(image)
+            image = ((image - self.mean.as_in_context(image.context))/self.std.as_in_context(image.context))
+            image = nd.expand_dims(image, axis=0)
 
             bboxes = batch_bboxes.at(i)
             labels = batch_labels.at(i)
@@ -228,7 +245,7 @@ class RetinaNetValLoader(object):
             all_images.append(image)
             all_labels.append(labels)
 
-        return all_images, all_labels
+        return all_images, all_labels, resized_attrs
 
     def feed_tensor_into_mx(self, pipe_out, ctx):
         if isinstance(pipe_out, dali.backend_impl.TensorGPU):
@@ -253,18 +270,19 @@ class RetinaNetValLoader(object):
 if __name__ == '__main__':
     val_split = 'val2017'
     thread_batch_size = 2
-    max_size = 800
+    max_size = 1024
     resize_shorter = 640
     num_devices = 4
     val_loader = RetinaNetValLoader(split=val_split, thread_batch_size=thread_batch_size,
                                     max_size=max_size, resize_shorter=resize_shorter,
-                                    num_devices=num_devices, fix_shape=True)
+                                    num_devices=num_devices, fix_shape=False)
     n = 0
     for data_batch in val_loader:
-        batch_data, batch_labels, batch_img_ids = data_batch
+        batch_data, batch_labels, batch_attrs, batch_img_ids = data_batch
         print ('image_ids : {}'.format(batch_img_ids))
-        for thread_image, thread_labels in zip(batch_data, batch_labels):
-            for image, labels in zip(thread_image, thread_labels):
+        print ('batch_attrs: {}'.format(batch_attrs))
+        for thread_image, thread_labels, thread_attrs in zip(batch_data, batch_labels, batch_attrs):
+            for image, labels, attrs in zip(thread_image, thread_labels, thread_attrs):
                 print ('image shape: {}'.format(image.shape))
                 print ('labels shape: {}'.format(labels.shape))
                 n += image.shape[0]

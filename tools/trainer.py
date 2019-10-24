@@ -52,29 +52,29 @@ if __name__ == '__main__':
                            lr_decay, train_split,
                            val_split, use_amp, gpus, save_prefix)
     elif model == 'retinanet':
-        network = config['network']
-        layers = config['layers']
+        backbone = config['backbone']
         dataset = config['dataset']
-        input_shape = config['input_shape']
         train_split = config['train_split']
-        batch_size = config['batch_size']
+        val_split = config['val_split']
+        max_size = config['max_size']
+        resize_shorter = config['resize_shorter']
+        gpu_batch_size = config['gpu_batch_size']
         optimizer = config['optimizer']
         lr = config['lr']
         wd = config['wd']
         momentum = config['momentum']
+        gpus = config['gpus']
         epoch = config['epoch']
         lr_decay = config.get('lr_decay', 0.1)
-        train_split = config['train_split']
-        val_split = config['val_split']
         use_amp = config['use_amp']
-        gpus = config['gpus']
+        save_frequent = config['save_frequent']
         save_prefix = config['save_prefix']
-        solver = RetinaNetSolver(network, layers, dataset, input_shape,
-                                 batch_size, optimizer, lr, wd, momentum, epoch,
+        solver = RetinaNetSolver(backbone, dataset, max_size, resize_shorter,
+                                 gpu_batch_size, optimizer, lr, wd, momentum, epoch,
                                  lr_decay, train_split, val_split, use_amp, gpus,
-                                 save_prefix)
+                                 save_frequent, save_prefix)
     else:
-        pass
+        raise NotImplementedError
 
     solver.train()
 

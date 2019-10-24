@@ -8,14 +8,11 @@ from mxnet import autograd
 from mxnet import nd
 from mxnet import gluon
 from mxnet.gluon import nn
-sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
-from lib.modelzoo.feature import network_extractor
-from lib.modelzoo.target import BoxDecoder
+from .feature import network_extractor
 
 
 class RetinaNet(nn.HybridBlock):
-    def __init__(self, network, layers, num_class,
-                 pyramid_filters=256):
+    def __init__(self, network, layers, num_class, pyramid_filters=256):
         super(RetinaNet, self).__init__()
         self.num_class = num_class
         self.num_anchor = 9
@@ -80,8 +77,6 @@ class RetinaNet(nn.HybridBlock):
                           weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
             )
             
-            self.bbox_decoder = BoxDecoder()
-
     def hybrid_forward(self, F, x):
         p3, p4, p5 = self.features(x)
         p6 = self.p6(p5)
@@ -113,13 +108,10 @@ class RetinaNet(nn.HybridBlock):
         loc_heads = [F.reshape(loc_head, (0, -1, 4)) for loc_head in loc_heads]
         loc_heads = F.concat(*loc_heads, dim=1)
 
-        # if autograd.is_training():
         return cls_heads, loc_heads
-        
+    
 
-if __name__ == '__main__':
-    input_size = 512
-    x = nd.random.uniform(0, 1, (1, 3, input_size, input_size))
+def retinanet_resnet50_v1_coco():
     network = 'resnet50_v1'
     layers = ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']
     num_class = 80
@@ -127,6 +119,19 @@ if __name__ == '__main__':
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         net.initialize()
+    return net
+
+
+if __name__ == '__main__':
+    input_size = 512
+    x = nd.random.uniform(0, 1, (1, 3, input_size, input_size))
+    """
+    network = 'resnet50_v1'
+    layers = ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']
+    num_class = 80
+    net = RetinaNet(network, layers, num_class)
+    """
+    net = retinanet_resnet50_v1_coco()
     with autograd.record():
         cls_heads, loc_heads = net(x)
         print (cls_heads.shape)

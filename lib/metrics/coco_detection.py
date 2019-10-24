@@ -224,3 +224,55 @@ class COCODetectionMetric(mx.metric.EvalMetric):
                                       'category_id': category_id,
                                       'bbox': bbox[:4].tolist(),
                                       'score': score})
+
+
+class RetinaNetCOCODetectionMetric(COCODetectionMetric):
+    def __init__(self, dataset, save_prefix, use_time=True, cleanup=False, score_thresh=0.05,
+                 data_shape=None):
+        super(RetinaNetCOCODetectionMetric, self).__init__(dataset, save_prefix, use_time, cleanup, score_thresh,
+                                                           data_shape)
+
+    # pylint: disable=arguments-differ, unused-argument
+    def update(self, pred_bboxes, pred_labels, pred_scores, resize_attrs, img_ids, gt_bboxes, gt_ids):
+        def as_numpy(a):
+            """Convert a (list of) mx.NDArray into numpy.ndarray"""
+            if isinstance(a, (list, tuple)):
+                out = [x.asnumpy() if isinstance(x, mx.nd.NDArray) else x for x in a]
+                return np.concatenate(out, axis=0)
+            elif isinstance(a, mx.nd.NDArray):
+                a = a.asnumpy()
+            return a
+
+        for pred_bbox, pred_label, pred_score, resize_attr, img_id in zip(
+                *[as_numpy(x) for x in [pred_bboxes, pred_labels, pred_scores, resize_attrs, img_ids]]):
+
+            valid_pred = np.where(pred_label.flat >= 0)[0]
+            pred_bbox = pred_bbox[valid_pred, :].astype(np.float)
+            pred_label = pred_label.flat[valid_pred].astype(int)
+            pred_score = pred_score.flat[valid_pred].astype(np.float)
+
+            imgid = int(img_id)  # self._img_ids[self._current_id]
+            resized_h, resized_w = resize_attr
+            self._current_id += 1
+            entry = self.coco.loadImgs(imgid)[0]
+            orig_height = entry['height']
+            orig_width = entry['width']
+            height_scale = float(orig_height) / resized_h
+            width_scale = float(orig_width) / resized_w
+            # for each bbox detection in each image
+            for bbox, label, score in zip(pred_bbox, pred_label, pred_score):
+                if label not in self.contiguous_id_to_json:
+                    # ignore non-exist class
+                    continue
+                if score < self._score_thresh:
+                    continue
+                category_id = self.contiguous_id_to_json[label]
+                # rescale bboxes
+                bbox[[0, 2]] *= width_scale
+                bbox[[1, 3]] *= height_scale
+                # convert [xmin, ymin, xmax, ymax]  to [xmin, ymin, w, h]
+                bbox[2:4] -= (bbox[:2] - 1)
+                self._results.append({'image_id': imgid,
+                                      'category_id': category_id,
+                                      'bbox': bbox[:4].tolist(),
+                                      'score': score})

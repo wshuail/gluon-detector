@@ -5,7 +5,6 @@ Losses are subclasses of gluon.loss.Loss which is a HybridBlock actually.
 import os
 import sys
 sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
-from __future__ import absolute_import
 from mxnet import gluon
 from mxnet import nd
 from mxnet.gluon.loss import Loss, _apply_weighting, _reshape_like

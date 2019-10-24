@@ -1,23 +1,18 @@
 
 model: 'retinanet'
-
+backbone: 'resnet50_v1'
 dataset: 'coco'
 train_split: 'train2017'
 val_split: 'val2017'
-
-input_shape: [512, 512]
-batch_size: 8
-
+max_size: 1024
+resize_shorter: 640
+gpu_batch_size: 2
 optimizer: 'sgd'
-lr: 0.001
+lr: 0.0003
 wd: 0.0005
 momentum: 0.9
 gpus: 0,1,2,3
 epoch: 30
 use_amp: False
-save_frequent: 2
-
-network: 'resnet50_v1'
-layers: ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']
-
+save_frequent: 5
 save_prefix: '~/gluon_detector/output'
