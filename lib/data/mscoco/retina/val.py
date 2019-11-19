@@ -169,7 +169,7 @@ class RetinaNetValLoader(object):
             pad_w = image_w - width
             image = nd.expand_dims(image, axis=0)
             # nd.pad only support 4/5-dimentional data so expand then squeeze
-            image = nd.pad(image, mode='constant', constant_value=0.0,
+            image = nd.pad(image, mode='constant', constant_value=-1.0,
                            pad_width=(0, 0, 0, 0, 0, pad_h, 0, pad_w))
             image = nd.squeeze(image)
             image = ((image - self.means.as_in_context(image.context))/self.stds.as_in_context(image.context))
@@ -235,12 +235,9 @@ if __name__ == '__main__':
     n = 0
     for data_batch in val_loader:
         batch_data, batch_labels, batch_attrs, batch_img_ids = data_batch
-        print ('image_ids : {}'.format(batch_img_ids))
-        print ('batch_attrs: {}'.format(batch_attrs))
         for thread_image, thread_labels, thread_attrs in zip(batch_data, batch_labels, batch_attrs):
             for image, labels, attrs in zip(thread_image, thread_labels, thread_attrs):
                 print ('image shape: {}'.format(image.shape))
-                print ('labels shape: {}'.format(labels.shape))
                 n += image.shape[0]
     print ('final n: {}'.format(n))
 

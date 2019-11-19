@@ -124,6 +124,28 @@ class YOLO(nn.HybridBlock):
         routes = []
         for stage in self.stages:
             x = stage(x)
+            print ('x shape: {}'.format(x.shape))
+            routes.append(x)
+        for i in reversed(range(len(routes))):
+            x = routes[i]
+            print ('x 3 shape: {}'.format(x.shape))
+            
+        for i, block, output in zip(range(len(routes)), self.blocks, self.outputs):
+            print ('x 2 shape: {}'.format(x.shape))
+            x, tip = block(x)
+            print ('tip shape: {}'.format(tip.shape))
+            if i >= len(routes) - 1:
+                break
+            x = self.transitions[i](x)
+            upsample = _upsample(x, stride=2)
+            route_now = routes[::-1][i + 1]
+            x = F.concat(F.slice_like(upsample, route_now * 0, axes=(2, 3)), route_now, dim=1)
+
+    def hybrid_forward_2(self, F, x):
+        routes = []
+        for stage in self.stages:
+            x = stage(x)
+            print ('x shape: {}'.format(x.shape))
             routes.append(x)
             
         all_dets = []
@@ -134,6 +156,7 @@ class YOLO(nn.HybridBlock):
         all_anchors = []
         all_offsets = []
         for i, block, output in zip(range(len(routes)), self.blocks, self.outputs):
+            print ('x 2 shape: {}'.format(x.shape))
             x, tip = block(x)
             print ('tip shape: {}'.format(tip.shape))
             if autograd.is_training():
@@ -193,8 +216,10 @@ if __name__ == '__main__':
     yolo = YOLO(stages, channels, anchors, strides, num_class)
     yolo.initialize()
 
-    x = nd.random.uniform(0, 1, (1, 3, 224, 224))
+    x = nd.random.uniform(0, 1, (1, 3, 320, 320))
     with autograd.record():
+        yolo(x)
+    """
         all_dets, all_box_centers, all_box_scales, all_objectness, all_class_pred, all_anchors, all_offsets = yolo(x)
     print ('det shapes: {}'.format([det.shape for det in all_dets]))
     print ('box_centers shapes: {}'.format([box_centers.shape for box_centers in all_box_centers]))
@@ -203,6 +228,7 @@ if __name__ == '__main__':
     print ('all_class_pred shapes: {}'.format([class_pred.shape for class_pred in all_class_pred]))
     print ('all_anchors shapes: {}'.format([anchors.shape for anchors in all_anchors]))
     print ('all_offsets shapes: {}'.format([offsets.shape for offsets in all_offsets]))
+    """
 
 
 

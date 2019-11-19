@@ -99,28 +99,24 @@ class SSDMultiBoxLoss(gluon.Block):
 
 
 class FocalLoss(Loss):
-    def __init__(self, num_class, alpha=0.25, gamma=2, huber_rho=0.11,
-                 debug=False, eps=1e-12, weight=None, batch_axis=0, **kwargs):
+    def __init__(self, num_class, alpha=0.25, gamma=2.0,
+                 weight=None, batch_axis=0, **kwargs):
         super(FocalLoss, self).__init__(weight, batch_axis, **kwargs)
         self._num_class = num_class
         self._alpha = alpha
         self._gamma = gamma
-        self._huber_rho = huber_rho
-        self._eps = eps
-        self._debug = debug
 
-    def hybrid_forward(self, F, pred, label):
+    def hybrid_forward(self, F, pred, label, mask):
         pred = F.clip(pred, 1e-4, 1-1e-4)
         
-        mask = F.where(label == -1, F.zeros_like(label), F.ones_like(label))
-        mask = F.expand_dims(mask, axis=-1)
-        mask = F.tile(mask, reps=(1, 1, self._num_class))
-
+        cls_mask = F.expand_dims(mask, axis=-1)
+        cls_mask = F.tile(cls_mask, reps=(1, 1, self._num_class))
+        cls_mask = F.where(cls_mask != -1, F.ones_like(cls_mask), F.zeros_like(cls_mask))
+        
         # num of positive samples
-        num_pos = F.where(label>0, F.ones_like(label), F.zeros_like(label))
-        num_pos = F.sum(label>0, axis=0, exclude=True)
+        num_pos = F.sum(mask>0, axis=0, exclude=True)
         num_pos = F.where(num_pos>0, num_pos, F.ones_like(num_pos))
-        # print ('cls num_pos: {}'.format(num_pos))
+        # print ('cls num_pos 2: {}'.format(num_pos))
         
         # convert 0 to -1 for one_hot encoding
         label = F.where(label == 0, F.ones_like(label)*-1, label)
@@ -137,7 +133,7 @@ class FocalLoss(Loss):
         bce = -(label * F.log(pred) + (1.0-label) * F.log(1.0-pred))
 
         loss = focal_weight * bce
-        loss = loss*mask
+        loss = loss*cls_mask
 
         loss = F.sum(loss, axis=0, exclude=True)/num_pos
 
@@ -149,29 +145,19 @@ class HuberLoss(Loss):
         super(HuberLoss, self).__init__(weight, batch_axis, **kwargs)
         self._rho = rho
 
-    def hybrid_forward(self, F, pred, label):
-        # print ('box max pred: {}'.format(F.max(pred)))
-        # print ('box sum pred: {}'.format(F.sum(pred)))
-        DEBUG = False
+    def hybrid_forward(self, F, pred, label, mask):
         # num of positive samples
-        pos = F.where(label != 0, F.ones_like(label), F.zeros_like(label))
-        num_pos = F.sum(pos, axis=-1)
-        num_pos = F.where(num_pos != 0, F.ones_like(num_pos), F.zeros_like(num_pos)) 
-        num_pos = F.sum(num_pos, axis=0, exclude=True)
+        num_pos = F.sum(mask>0, axis=0, exclude=True)
         num_pos = F.where(num_pos>0, num_pos, F.ones_like(num_pos))
-        # print ('box num_pos: {}'.format(num_pos))
-        if DEBUG:
-            label_np = label[0, :, :].asnumpy()
-            label_np_sum = label_np.sum(axis=-1)
-            pos_idx = (label_np_sum != 0)
-            pos_label = label_np[pos_idx, :]
-            # print ('pos_label: {}'.format(pos_label))
-            print ('pos: {}'.format(pos[0, :, :].asnumpy()[pos_idx, :]))
-
-        # print ('pred mean: {}'.format(F.mean(pred)))
+        
+        box_mask = F.expand_dims(mask, axis=-1)
+        box_mask = F.tile(box_mask, reps=(1, 1, 4))
+        box_mask = F.where(box_mask==1, box_mask, F.zeros_like(box_mask))
+        # print ('nd sum box_mask: {}'.format(nd.sum(box_mask)))
+        
         loss = F.abs(label - pred)
         loss = F.where(loss > self._rho, loss - 0.5 * self._rho, (0.5 / self._rho) * F.square(loss))
-        loss = loss*pos
+        loss = loss*box_mask
         loss = F.sum(loss, axis=0, exclude=True)/num_pos
 
         return loss

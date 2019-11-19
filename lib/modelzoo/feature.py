@@ -19,10 +19,13 @@ def conv_act_layer(data, num_filter, kernel, stride, pad, name, use_bn=True):
     return data
 
 
-def parse_network(network, layers, inputs='data'):
+def parse_network(network, layers, inputs='data', fix_bn=False):
     sys.path.insert(0, os.path.expanduser('~/gluon-cv/'))
     from gluoncv.model_zoo import get_model
-    network = get_model(network, pretrained=True)
+    if fix_bn:
+        network = get_model(network, pretrained=True, norm_kwargs={'use_global_stats': True})
+    else:
+        network = get_model(network, pretrained=True)
 
     params = network.collect_params()
     prefix = network._prefix
@@ -62,7 +65,7 @@ def centernet_extractor(network, layers):
     output_blocks = SymbolBlock(outputs=output_layers, inputs=inputs, params=params)
     return output_blocks
 
-def network_extractor(network, layers):
-    output_layers, inputs, params = parse_network(network, layers)
+def network_extractor(network, layers, fix_bn=True):
+    output_layers, inputs, params = parse_network(network, layers, fix_bn)
     output_blocks = SymbolBlock(outputs=output_layers, inputs=inputs, params=params)
     return output_blocks

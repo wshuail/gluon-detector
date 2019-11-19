@@ -8,7 +8,10 @@ from mxnet import autograd
 from mxnet import nd
 from mxnet import gluon
 from mxnet.gluon import nn
-from .feature import network_extractor
+from pathlib import Path
+d = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(d))
+from lib.modelzoo.feature import network_extractor
 
 
 class RetinaNet(nn.HybridBlock):
@@ -19,7 +22,7 @@ class RetinaNet(nn.HybridBlock):
 
         with self.name_scope():
             
-            self.features = network_extractor(network, layers)
+            self.features = network_extractor(network, layers, fix_bn=True)
 
             self.p5_1 = nn.Conv2D(channels=pyramid_filters, kernel_size=(1, 1), strides=(1, 1), padding=(0, 0))
             self.p5_2 = nn.Conv2D(channels=pyramid_filters, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1))
@@ -74,7 +77,8 @@ class RetinaNet(nn.HybridBlock):
                           weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
                 nn.Conv2D(channels=4*self.num_anchor, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
-                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
+                          weight_initializer=mx.init.Normal(sigma=0.01),
+                          bias_initializer='zeros'),
             )
             
     def hybrid_forward(self, F, x):
@@ -86,12 +90,10 @@ class RetinaNet(nn.HybridBlock):
         p5_2 = self.p5_2(p5_1)
         
         p5_up = F.UpSampling(p5_1, scale=2, sample_type='nearest')
-        p5_up = F.slice_like(p5_up, p4* 0, axes=(2, 3))
         p4_1 = self.p4_1(p4) + p5_up
         p4_2 = self.p4_2(p4_1)
         
         p4_up = F.UpSampling(p4_1, scale=2, sample_type='nearest')
-        p4_up = F.slice_like(p4_up, p3* 0, axes=(2, 3))
         p3_1 = self.p3_1(p3) + p4_up
         p3_2 = self.p3_2(p3_1)
 
@@ -114,8 +116,16 @@ class RetinaNet(nn.HybridBlock):
 def retinanet_resnet50_v1_coco():
     network = 'resnet50_v1'
     layers = ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']
+    freeze_layers = ['resnetv11_conv0_weight']
     num_class = 80
     net = RetinaNet(network, layers, num_class)
+    params = net.collect_params()
+    # fix some params
+    stage0_conv_weight = list(params.values())[0]
+    stage0_conv_weight.grad_req = 'null'
+    for k, v in params.items():
+        if 'stage1' in k:
+            v.grad_req = 'null'
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         net.initialize()
@@ -123,14 +133,7 @@ def retinanet_resnet50_v1_coco():
 
 
 if __name__ == '__main__':
-    input_size = 512
-    x = nd.random.uniform(0, 1, (1, 3, input_size, input_size))
-    """
-    network = 'resnet50_v1'
-    layers = ['stage2_activation3', 'stage3_activation5', 'stage4_activation2']
-    num_class = 80
-    net = RetinaNet(network, layers, num_class)
-    """
+    x = nd.random.uniform(0, 1, (1, 3, 1024, 640))
     net = retinanet_resnet50_v1_coco()
     with autograd.record():
         cls_heads, loc_heads = net(x)

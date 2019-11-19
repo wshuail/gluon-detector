@@ -21,13 +21,10 @@ from lib.metrics.coco_detection import RetinaNetCOCODetectionMetric
 class Evaluator(object):
     def __init__(self, params_file, split='val2017', max_size=1024, resize_shorter=640,
                  gpus='0,1,2,3', thread_batch_size=2, save_prefix='~/gluon_detector/output',
-                 nms_thresh=0.45, nms_topk=400, post_nms=100,
-                 stds=(0.1, 0.1, 0.2, 0.2), means=(0., 0., 0., 0.), **kwargs):
+                 nms_thresh=0.45, nms_topk=400, post_nms=100, **kwargs):
         self.nms_thresh = nms_thresh
         self.nms_topk = nms_topk
         self.post_nms = post_nms
-        self.stds = stds
-        self.means = means
         gpu_ids = [int(gpu_id) for gpu_id in gpus.split(',')]
         self.ctx = [mx.gpu(gpu_id) for gpu_id in gpu_ids]
         num_devices = len(self.ctx)
@@ -49,7 +46,7 @@ class Evaluator(object):
 
         log_file = 'retinanet_coco_eval'
         log_path = os.path.expanduser(os.path.join(save_prefix, log_file))
-        self.eval_metric = RetinaNetCOCODetectionMetric(dataset=split, save_prefix=log_path)
+        self.eval_metric = RetinaNetCOCODetectionMetric(dataset=split, save_prefix=log_path, score_thresh=0.3)
         logging.info('eval_metric initilized.')
  
     def validation(self):
@@ -76,7 +73,7 @@ class Evaluator(object):
                     anchors = generate_retinanet_anchors((h, w))
                     anchors = nd.reshape(anchors, (1, -1, 4))
                     anchors = anchors.as_in_context(image.context)
-                    ids, scores, bboxes = decode_retinanet_result(box_preds, cls_preds, anchors)
+                    ids, scores, bboxes = decode_retinanet_result(box_preds, cls_preds, anchors, nms_thresh=0.5)
                     
                     det_ids.append(ids)
                     det_scores.append(scores)
@@ -99,9 +96,8 @@ class Evaluator(object):
 
 
 if __name__ == '__main__':
-    # params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_512x512-deploy-0000.params'
-    params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_512x512-0010.params'
-    evaluator = Evaluator(params_file)
+    params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_1024x640-9999.params'
+    evaluator = Evaluator(params_file, gpus='0')
     evaluator.validation()
 
 

@@ -15,7 +15,7 @@ from nvidia.dali.pipeline import Pipeline
 from nvidia.dali.plugin.mxnet import feed_ndarray
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
 from lib.anchor.retinanet import generate_retinanet_anchors
-from code import encode_box_target
+from lib.data.mscoco.retina.code import encode_box_target
 
 
 class AspectRatioBasedSampler(object):
@@ -196,17 +196,6 @@ class TrainPipeline(Pipeline):
         self.decode = ops.ImageDecoder(device = "mixed", output_type = types.RGB)
         
         # Augumentation techniques
-        self.crop = dali.ops.RandomBBoxCrop(
-            device="cpu",
-            aspect_ratio=[0.5, 2.0],
-            thresholds=[0, 0.1, 0.3, 0.5, 0.7, 0.9],
-            # scaling=[0.3, 1.0],
-            ltrb=True,
-            allow_no_crop=True,
-            num_attempts=1)
-        self.slice = dali.ops.Slice(device="gpu")
-        self.twist = dali.ops.ColorTwist(device="gpu")
-
         if fix_shape:
             data_shape = 512
             self.resize = dali.ops.Resize(
@@ -241,10 +230,6 @@ class TrainPipeline(Pipeline):
                 pad_output=False)
         
         # Random variables
-        self.rng1 = dali.ops.Uniform(range=[0.5, 1.5])
-        self.rng2 = dali.ops.Uniform(range=[0.875, 1.125])
-        self.rng3 = dali.ops.Uniform(range=[-0.5, 0.5])
-
         self.flip = dali.ops.Flip(device="gpu")
         self.bbflip = dali.ops.BbFlip(device="cpu", ltrb=True)
         self.flip_coin = dali.ops.CoinFlip(probability=0.5)
@@ -255,10 +240,6 @@ class TrainPipeline(Pipeline):
 
     def define_graph(self):                                                                
         
-        saturation = self.rng1()
-        contrast = self.rng1()
-        brightness = self.rng2()
-        hue = self.rng3()
         coin_rnd = self.flip_coin()
         
         self.image_ids = self.input_images_ids_op()
@@ -267,21 +248,14 @@ class TrainPipeline(Pipeline):
         self.labels = self.input_labels_op()
         images = self.decode(self.images)                                                   
 
-        crop_begin, crop_size, bboxes, labels = self.crop(self.bboxes, self.labels)
-        images = self.slice(images, crop_begin, crop_size)
-
         images = self.flip(images, horizontal=coin_rnd)
-        bboxes = self.bbflip(bboxes, horizontal=coin_rnd)
+        bboxes = self.bbflip(self.bboxes, horizontal=coin_rnd)
         images = self.resize(images)
         
-        images = self.twist(
-            images,
-            saturation=saturation,
-            contrast=contrast,
-            brightness=brightness,
-            hue=hue)
-        # images = self.normalize(images)
-        labels = self.cast(labels)
+        """
+        images = self.normalize(images)
+        """
+        labels = self.cast(self.labels)
 
         return images, bboxes.gpu(), labels.gpu(), self.image_ids.gpu()
 
@@ -309,8 +283,7 @@ class TrainPipeline(Pipeline):
 
 class RetinaNetTrainLoader(object):
     def __init__(self, split, thread_batch_size, max_size, resize_shorter,
-                 num_devices=4, means=(0., 0., 0., 0.), stds=(0.1, 0.1, 0.2, 0.2),
-                 fix_shape=False, **kwargs):
+                 num_devices=4, fix_shape=False, **kwargs):
         sampler = AspectRatioBasedSampler(split=split, thread_batch_size=thread_batch_size)
         pipes = [TrainPipeline(sampler, batch_size=thread_batch_size, max_size=max_size,
                                resize_shorter=resize_shorter, fix_shape=fix_shape, num_threads=4,
@@ -318,8 +291,6 @@ class RetinaNetTrainLoader(object):
         self.pipelines = pipes
         self.max_size = max_size
         self.resize_shorter = resize_shorter
-        self._code_stds = stds
-        self._code_means = means
         self.fix_shape = fix_shape
         self.num_worker = num_devices
         self._size = self.pipelines[0].size()
@@ -346,6 +317,7 @@ class RetinaNetTrainLoader(object):
         all_labels = []
         box_targets = []
         cls_targets = []
+        all_masks = []
         all_image_ids = []
         for idx, pipe in enumerate(self.pipelines):
             ctx = mx.gpu(idx)
@@ -355,6 +327,7 @@ class RetinaNetTrainLoader(object):
             batch_cls_ids = []
             batch_image_ids_ = []
             batch_box_targets, batch_cls_targets = [], []
+            batch_mask = []
             for i in range(self.batch_size):
                 image = batch_data.at(i)
                 image = self.feed_tensor_into_mx(image, ctx)
@@ -382,12 +355,10 @@ class RetinaNetTrainLoader(object):
                 hw_ratio = hs[0]/ws[0]
                 if hw_ratio >= 1:
                     image_h, image_w = self.max_size, self.resize_shorter
-                    pad_hs = [image_h - image.shape[1] for image in batch_images]
-                    pad_ws = [image_w - image.shape[2] for image in batch_images]
                 else:
                     image_h, image_w = self.resize_shorter, self.max_size
-                    pad_hs = [image_h - image.shape[1] for image in batch_images]
-                    pad_ws = [image_w - image.shape[2] for image in batch_images]
+                pad_hs = [image_h - image.shape[1] for image in batch_images]
+                pad_ws = [image_w - image.shape[2] for image in batch_images]
             else:
                 max_h = max(hs) + (32-max(hs)%32)%32  # in case max(hs)%32 == 0
                 max_w = max(ws) + (32-max(ws)%32)%32
@@ -396,9 +367,9 @@ class RetinaNetTrainLoader(object):
                 image_w, image_h = max_w, max_h
                 assert image_w == 512
                 assert image_h == 512
-            # nd.pad only support 4/5-dimentional data so expand then squeeze
+            # nd.pad only support 4/5-dimentional data so expand
             batch_images = [nd.expand_dims(image, axis=0) for image in batch_images]
-            batch_images = [nd.pad(image, mode='constant', constant_value=0.0,
+            batch_images = [nd.pad(image, mode='constant', constant_value=-1.0,
                                    pad_width=(0, 0, 0, 0, 0, pad_h, 0, pad_w))
                             for image, pad_h, pad_w in zip(batch_images, pad_hs, pad_ws)] 
             self.means = self.means_list[idx]
@@ -420,16 +391,21 @@ class RetinaNetTrainLoader(object):
                 
                 box_ious = nd.contrib.box_iou(anchors, bboxes, format='center')
                 ious, indices = nd.topk(box_ious, axis=-1, ret_typ='both', k=1)
-                # print ('max ious: {}'.format(nd.max(ious)))
 
                 box_target = nd.take(bboxes, indices).reshape((-1, 4))
-                box_target = encode_box_target(box_target, anchors, self._code_means, self._code_stds)
+                box_target = encode_box_target(box_target, anchors)
                 
                 cls_target = nd.take(cls_ids, indices).reshape((-1, 1))
+                # print ('cls_target shape: {}'.format(cls_target.shape))
      
                 mask = nd.ones_like(ious)*-1
                 mask = nd.where(ious<0.4, nd.zeros_like(ious), mask)
                 mask = nd.where(ious>0.5, nd.ones_like(ious), mask)
+                # print ('mask: {}'.format(mask.shape))
+                batch_mask.append(mask)
+                # print ('pos sample: {}'.format(nd.sum(mask==1)))
+                # print ('neg sample: {}'.format(nd.sum(mask==0)))
+                # print ('ign sample: {}'.format(nd.sum(mask==-1)))
 
                 box_mask = nd.tile(mask, reps=(1, 4))
                 box_target = nd.where(box_mask, box_target, nd.zeros_like(box_target))
@@ -440,21 +416,27 @@ class RetinaNetTrainLoader(object):
 
             batch_box_targets = [nd.expand_dims(box_target, axis=0) for box_target in batch_box_targets]
             batch_cls_targets = [nd.expand_dims(cls_target, axis=0) for cls_target in batch_cls_targets]
+            batch_mask = [nd.expand_dims(mask, axis=0) for mask in batch_mask]
 
             batch_images = nd.concat(*batch_images, dim=0)
             batch_box_targets = nd.concat(*batch_box_targets, dim=0)
             batch_cls_targets = nd.concat(*batch_cls_targets, dim=0).squeeze()
+            # print ('batch_cls_targets shape: {}'.format(batch_cls_targets.shape))
+            batch_mask = nd.concat(*batch_mask, dim=0).squeeze()
+            # print ('batch_mask shape: {}'.format(batch_mask.shape))
+            
 
             images.append(batch_images)
             all_bboxes.append(batch_xywh_bboxes)
             all_labels.append(batch_cls_ids)
             box_targets.append(batch_box_targets)
             cls_targets.append(batch_cls_targets)
+            all_masks.append(batch_mask)
             all_image_ids.append(batch_image_ids_)
 
         self.count += self.num_worker*self.batch_size
         
-        return images, box_targets, cls_targets, all_image_ids, all_bboxes, all_labels
+        return images, box_targets, cls_targets, all_masks, all_image_ids, all_bboxes, all_labels
 
     def feed_tensor_into_mx(self, pipe_out, ctx):
         if isinstance(pipe_out, dali.backend_impl.TensorGPU):
@@ -504,28 +486,12 @@ if __name__ == '__main__':
                                        fix_shape=False)
     n = 0
     for i, data_batch in enumerate(iter(data_loader)):
-        batch_images, batch_box_targets, batch_cls_targets, batch_image_ids, batch_bboxes, batch_labels = data_batch
-        for thread_images, thread_box_targets, thread_cls_targets, thread_image_ids, thread_bboxes, thread_labels in \
-                zip(batch_images, batch_box_targets, batch_cls_targets, batch_image_ids, batch_bboxes, batch_labels):
-            for i in range(thread_images.shape[0]):
-                n += 1
-                image_id = thread_image_ids[i]
-                print ('image_id: {}'.format(image_id))
-                image = thread_images[i, :, :, :]
-                print ('image shape: {}'.format(image.shape))
-
-                """
-                box_targets = thread_box_targets[i, :, :]
-                print ('sum box_targets: {}'.format(nd.sum(box_targets)))
-                cls_targets = thread_cls_targets[i, :]
-                print ('sum cls_targets: {}'.format(nd.sum(cls_targets)))
-                bboxes = thread_bboxes[i]
-                print ('bboxes: {}'.format(bboxes))
-                labels = thread_labels[i]
-                """
-                if n == 200:
-                    assert False
-
+        batch_images, batch_box_targets, batch_cls_targets, batch_masks, batch_image_ids, batch_bboxes, batch_labels = data_batch
+        for thread_images, thread_box_targets, thread_cls_targets, thread_masks, thread_image_ids, thread_bboxes, thread_labels in \
+                zip(batch_images, batch_box_targets, batch_cls_targets, batch_masks, batch_image_ids, batch_bboxes, batch_labels):
+            print ('image shape: {}'.format(thread_images.shape))
+            print ('thread_masks shape: {}'.format(thread_masks.shape))
+            assert False
 
     print ('final n: {}'.format(n))
  

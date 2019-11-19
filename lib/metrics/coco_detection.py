@@ -229,8 +229,8 @@ class COCODetectionMetric(mx.metric.EvalMetric):
 class RetinaNetCOCODetectionMetric(COCODetectionMetric):
     def __init__(self, dataset, save_prefix, use_time=True, cleanup=False, score_thresh=0.05,
                  data_shape=None):
-        super(RetinaNetCOCODetectionMetric, self).__init__(dataset, save_prefix, use_time, cleanup, score_thresh,
-                                                           data_shape)
+        super(RetinaNetCOCODetectionMetric, self).__init__(dataset, save_prefix, use_time,
+                                                           cleanup, score_thresh, data_shape)
 
     # pylint: disable=arguments-differ, unused-argument
     def update(self, pred_bboxes, pred_labels, pred_scores, resize_attrs, img_ids, gt_bboxes, gt_ids):
@@ -251,7 +251,7 @@ class RetinaNetCOCODetectionMetric(COCODetectionMetric):
             pred_label = pred_label.flat[valid_pred].astype(int)
             pred_score = pred_score.flat[valid_pred].astype(np.float)
 
-            imgid = int(img_id)  # self._img_ids[self._current_id]
+            imgid = int(img_id)
             resized_h, resized_w = resize_attr
             self._current_id += 1
             entry = self.coco.loadImgs(imgid)[0]

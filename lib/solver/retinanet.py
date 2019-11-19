@@ -6,6 +6,7 @@ import logging
 import warnings
 import time
 import datetime
+import numpy as np
 sys.path.insert(0, os.path.expanduser('~/lib/incubator-mxnet/python'))
 import mxnet as mx
 from mxnet import nd
@@ -15,6 +16,7 @@ from mxnet.contrib import amp
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
 from lib.utils.logger import build_logger
 from lib.utils.export_helper import export_block
+from lib.utils.lr_scheduler import LRSequential, LRScheduler
 from lib.loss import FocalLoss, HuberLoss
 from lib.modelzoo import get_model
 from lib.anchor.retinanet import generate_retinanet_anchors
@@ -26,7 +28,7 @@ from lib.data.mscoco.retina.code import decode_retinanet_result
 
 class RetinaNetSolver(object):
     def __init__(self, backbone, dataset, max_size, resize_shorter, gpu_batch_size, optimizer,
-                 lr, wd, momentum, epoch, lr_decay, train_split='train2017', val_split='val2017',
+                 lr, wd, resume_epoch=0, train_split='train2017', val_split='val2017',
                  use_amp=False, gpus='0,1,2,3', save_frequent=5, save_dir='~/gluon_detector/output'):
         self.backbone = backbone
         self.dataset = dataset
@@ -38,10 +40,7 @@ class RetinaNetSolver(object):
         self.optimizer = optimizer
         self.lr = lr
         self.wd = wd
-        self.momentum = momentum
-        self.epoch = epoch
-        self.lr_decay = lr_decay
-        self.lr_decay_epoch = ','.join([str(l*epoch) for l in [0.6, 0.8]])
+        self.resume_epoch = resume_epoch
         self.use_amp = use_amp
         self.ctx = [mx.gpu(int(i)) for i in gpus.split(',') if i.strip()]
         self.num_devices = len(self.ctx)
@@ -51,14 +50,16 @@ class RetinaNetSolver(object):
         
         prefix = 'retinanet_{}_{}_{}x{}'.format(dataset, backbone, max_size, resize_shorter)
         self.save_prefix = os.path.join(self.save_dir, prefix)
-        self.get_logger(self.save_prefix)
-        
-        model_name = 'retinanet_{}_{}'.format(backbone, dataset)
-        self.net = get_model(model_name)
 
+        self.net = self.build_net()
+        
         self.train_data, self.val_data = self.get_dataloader()
+        
         num_example = self.train_data.size()
         logging.info('number of example in training set is {}'.format(num_example))
+        self.lr_scheduler, self.epoch = self.get_lr_scheduler(self.lr, num_example,
+                                                              self.batch_size,
+                                                              lr_schd='1x')
         
         eval_file = 'retinanet_{}_{}_{}x{}_eval'.format(dataset, backbone, max_size, resize_shorter) 
         eval_path = os.path.join(self.save_dir, eval_file)
@@ -68,6 +69,19 @@ class RetinaNetSolver(object):
             amp.init()
 
         logging.info('RetinaNetSolver initialized')
+
+
+    def build_net(self):
+        model_name = 'retinanet_{}_{}'.format(self.backbone, self.dataset)
+        net = get_model(model_name)
+        if self.resume_epoch>0:
+            resume_params_file = '{}-{:04d}.params'.format(self.save_prefix, self.resume_epoch)
+            net.load_parameters(resume_params_file)
+            logging.info('Resume training from epoch {}'.format(self.resume_epoch))
+        else:
+            logging.info('Start training from scratch...')
+
+        return net
 
     def get_dataloader(self):
         logging.info('getting data loader.')
@@ -89,6 +103,24 @@ class RetinaNetSolver(object):
 
         return train_loader, val_loader
     
+    def get_lr_scheduler(self, lr, num_example, batch_size, lr_schd='1x'):
+        # lr = 0.005 / 8 * len(self.ctx) * self.thread_batch_size
+        iters_per_epoch = num_example // batch_size
+        if lr_schd == '1x':
+            step_factor = 16 // (len(self.ctx) * self.thread_batch_size)
+            step_iter = (60000*step_factor, 80000*step_factor)
+            total_iter = 90000*step_factor
+            epoch = int(np.ceil(total_iter/iters_per_epoch))
+        else:
+            raise NotImplementedError
+        logging.info('Total training epoch {}'.format(epoch))
+        lr_scheduler = LRSequential([
+            LRScheduler('linear', base_lr=0, target_lr=lr, niters=500),
+            LRScheduler('step', base_lr=self.lr, niters=total_iter, step_iter=step_iter)
+        ])
+
+        return lr_scheduler, epoch
+
     def train(self):
 
         self.net.collect_params().reset_ctx(self.ctx)
@@ -96,31 +128,22 @@ class RetinaNetSolver(object):
         trainer = gluon.Trainer(
             params=self.net.collect_params(),
             optimizer='sgd',
-            optimizer_params={'learning_rate': self.lr,
+            optimizer_params={'lr_scheduler': self.lr_scheduler,
                               'wd': self.wd,
-                              'momentum': self.momentum},
+                              'momentum': 0.9},
             update_on_kvstore=(False if self.use_amp else None)
         )
 
         if self.use_amp:
             amp.init_trainer(trainer)
         
-        lr_decay = self.lr_decay
-        lr_steps = sorted([float(ls) for ls in self.lr_decay_epoch.split(',') if ls.strip()])
-
         cls_criterion = FocalLoss(num_class=80)
         box_criterion = HuberLoss(rho=0.11)
         cls_metric = mx.metric.Loss('FocalLoss')
         box_metric = mx.metric.Loss('SmoothL1')
 
-        logging.info('Start training from scratch...')
         
         for epoch in range(self.epoch):
-            while lr_steps and epoch > lr_steps[0]:
-                new_lr = trainer.learning_rate*lr_decay
-                lr_steps.pop(0)
-                trainer.set_learning_rate(new_lr)
-                logging.info("Epoch {} Set learning rate to {}".format(epoch, new_lr))
             cls_metric.reset()
             box_metric.reset()
             tic = time.time()
@@ -129,7 +152,7 @@ class RetinaNetSolver(object):
             self.net.collect_params().reset_ctx(self.ctx)
             self.net.hybridize(static_alloc=True, static_shape=True)
             for i, batch in enumerate(iter(self.train_data)):
-                data, box_targets, cls_targets, _, _, _ = batch
+                data, box_targets, cls_targets, masks, _, _, _ = batch
                 with autograd.record():
                     cls_preds = []
                     box_preds = []
@@ -137,10 +160,10 @@ class RetinaNetSolver(object):
                         cls_pred, box_pred = self.net(x)
                         cls_preds.append(cls_pred)
                         box_preds.append(box_pred)
-                    cls_loss = [cls_criterion(cls_pred, cls_target) for cls_pred, cls_target in
-                                zip(cls_preds, cls_targets)]
-                    box_loss = [box_criterion(box_pred, box_target) for box_pred, box_target in
-                                zip(box_preds, box_targets)]
+                    cls_loss = [cls_criterion(cls_pred, cls_target, mask) for cls_pred, cls_target, mask in
+                                zip(cls_preds, cls_targets, masks)]
+                    box_loss = [box_criterion(box_pred, box_target, mask) for box_pred, box_target, mask in
+                                zip(box_preds, box_targets, masks)]
                     sum_loss = [(cl+bl) for cl, bl in zip(cls_loss, box_loss)]
                     
                     if self.use_amp:
@@ -156,12 +179,13 @@ class RetinaNetSolver(object):
                 if i > 0 and i % 50 == 0:
                     name1, loss1 = cls_metric.get()
                     name2, loss2 = box_metric.get()
-                    logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.5f}, {}={:.5f}'.\
-                           format(epoch, i, self.batch_size/(time.time()-btic), name1, loss1, name2, loss2))
+                    speed = self.batch_size/(time.time()-btic)
+                    logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.5f}, {}={:.5f}, lr={:.7f}'.\
+                                 format(epoch+1, i, speed, name1, loss1, name2, loss2, trainer.learning_rate))
             
                 btic = time.time()
-            logging.info('[Epoch {}] time cost {:.3f}s'.format(epoch, time.time() - tic))
-            self.save_params(epoch)
+            logging.info('[Epoch {}] time cost {:.3f}s'.format(epoch+1, time.time() - tic))
+            self.save_params(epoch+1)
             self.validation()
 
 
@@ -201,8 +225,8 @@ class RetinaNetSolver(object):
                     gt_ids.append(labels.slice_axis(axis=-1, begin=4, end=5))
                     gt_bboxes.append(labels.slice_axis(axis=-1, begin=0, end=4))
 
-                    if i % 1000 == 0:
-                        logging.info('Validation {} images processed.'.format(i))
+                    if count % 1000 == 0:
+                        logging.info('Validation {} images processed.'.format(count))
             
             self.eval_metric.update(det_bboxes, det_ids, det_scores, batch_resize_attrs, batch_img_ids, gt_bboxes, gt_ids)
 
@@ -217,6 +241,7 @@ class RetinaNetSolver(object):
 
     def save_params(self, epoch):
         if epoch % self.save_frequent == 0:
+            epoch += self.resume_epoch
             # save parameters
             filename = '{}-{:04d}.params'.format(self.save_prefix, epoch)
             self.net.save_parameters(filename=filename)

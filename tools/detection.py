@@ -12,7 +12,7 @@ from mxnet import gluon
 from mxnet.gluon.data.vision import transforms
 from mxnet.gluon.block import SymbolBlock
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
-from lib.data.mscoco.retina.val import decode_retinanet_result
+from lib.data.mscoco.retina.code import decode_retinanet_result
 from lib.anchor.retinanet import generate_retinanet_anchors
 
 
@@ -119,7 +119,7 @@ class RetinaNetDetector(object):
             image_h, image_w = self.max_size, self.resize_shorter
         else:
             image_h, image_w = self.resize_shorter, self.max_size
-        patten = nd.zeros((image_h, image_w, 3))
+        patten = nd.ones((image_h, image_w, 3))*-1
         patten[0: resized_h, 0: resized_w, :] = image
         image = patten
         image = ((image-self.mean)/self.std)

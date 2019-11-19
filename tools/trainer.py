@@ -1,10 +1,12 @@
 import argparse
 import os
 import sys
+import datetime
 import yaml
 import logging
 sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
+from lib.utils.logger import build_logger
 from lib.solver import SSDSolver
 from lib.solver import CenterNetSolver
 from lib.solver import RetinaNetSolver
@@ -62,16 +64,22 @@ if __name__ == '__main__':
         optimizer = config['optimizer']
         lr = config['lr']
         wd = config['wd']
-        momentum = config['momentum']
+        resume_epoch = config['resume_epoch']
         gpus = config['gpus']
-        epoch = config['epoch']
-        lr_decay = config.get('lr_decay', 0.1)
         use_amp = config['use_amp']
         save_frequent = config['save_frequent']
         save_prefix = config['save_prefix']
+
+        timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+        log_file_name = 'retinanet_{}_{}_{}x{}_train_{}.log'.\
+            format(dataset, backbone, max_size, resize_shorter, timestamp)
+        log_path = os.path.join(os.path.expanduser(save_prefix), log_file_name)
+        build_logger(log_path)
+        logging.info(config)
+
         solver = RetinaNetSolver(backbone, dataset, max_size, resize_shorter,
-                                 gpu_batch_size, optimizer, lr, wd, momentum, epoch,
-                                 lr_decay, train_split, val_split, use_amp, gpus,
+                                 gpu_batch_size, optimizer, lr, wd, resume_epoch,
+                                 train_split, val_split, use_amp, gpus,
                                  save_frequent, save_prefix)
     else:
         raise NotImplementedError
