@@ -5,185 +5,195 @@ import yaml
 import logging
 import warnings
 import time
+import numpy as np
 sys.path.insert(0, os.path.expanduser('~/lib/incubator-mxnet/python'))
 import mxnet as mx
 from mxnet import nd
 from mxnet import gluon
 from mxnet import autograd
 from mxnet.contrib import amp
-from nvidia.dali.plugin.mxnet import DALIGenericIterator
 sys.path.insert(0, os.path.expanduser('~/gluon_detector'))
-from lib.centernet_loss import FocalLoss
-from lib.modelzoo.centernet import CenterNet
+from lib.utils.lr_scheduler import LRSequential, LRScheduler
+from lib.loss import HeatmapFocalLoss, MaskedL1Loss
+from lib.modelzoo import get_model
 from lib.data.mscoco.centernet import CenterNetTrainPipeline
 from lib.data.mscoco.centernet import CenterNetTrainLoader
 from lib.data.mscoco.detection import ValPipeline
 from lib.data.mscoco.detection import ValLoader
 from lib.metrics.coco_detection import COCODetectionMetric
 from lib.utils.export_helper import export_block
-from .base import BaseSolver
 
 
-class CenterNetSolver(BaseSolver):
-    def __init__(self, config):
-        super(CenterNetSolver, self).__init__(config=config)
+class CenterNetSolver(object):
+    def __init__(self, backbone, dataset, input_size, gpu_batch_size, optimizer,
+                 lr, wd, resume_epoch=0, train_split='train2017', val_split='val2017',
+                 use_amp=False, gpus='0,1,2,3', save_frequent=5, save_dir='~/gluon_detector/output'):
+        self.backbone = backbone
+        self.dataset = dataset
+        self.input_size = input_size
+        self.thread_batch_size = gpu_batch_size
+        self.train_split = train_split
+        self.val_split = val_split
+        self.optimizer = optimizer
+        self.lr = lr
+        self.wd = wd
+        self.resume_epoch = resume_epoch
+        self.use_amp = use_amp
+        self.ctx = [mx.gpu(int(i)) for i in gpus.split(',') if i.strip()]
+        self.num_devices = len(self.ctx)
+        self.batch_size = gpu_batch_size * self.num_devices
+        self.save_frequent = save_frequent
+        self.save_dir = os.path.expanduser(save_dir)
+        
+        prefix = 'retinanet_{}_{}_{}x{}'.format(dataset, backbone, input_size, input_size)
+        self.save_prefix = os.path.join(self.save_dir, prefix)
+
+        self.net = self.build_net()
+        
+        self.train_data, self.val_data = self.get_dataloader()
+        
+        num_example = self.train_data.size()
+        logging.info('number of example in training set is {}'.format(num_example))
+        self.lr_scheduler, self.epoch = self.get_lr_scheduler(self.lr, num_example,
+                                                              self.batch_size,
+                                                              lr_schd='1x')
+        
+        eval_file = 'centernet_{}_{}_{}x{}_eval'.format(dataset, backbone, input_size, input_size) 
+        eval_path = os.path.join(self.save_dir, eval_file)
+        self.eval_metric = COCODetectionMetric(dataset=self.val_split, save_prefix=eval_path,
+                                               use_time=False, cleanup=True,
+                                               data_shape=(self.input_size, self.input_size))
+
+        logging.info('RetinaNetSolver initialized')
     
     def build_net(self):
-        config = self.config
-        network = config['network']
-        layers = config['layers']
-        heads = config['heads']
-        head_conv = config['head_conv']
-        net = CenterNet(network, layers, heads, head_conv)
-    
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            net.initialize()
-        logging.info('network initialized done.')
+        model_name = 'centernet_{}_{}'.format(self.backbone, self.dataset)
+        net = get_model(model_name)
+        if self.resume_epoch>0:
+            resume_params_file = '{}-{:04d}.params'.format(self.save_prefix, self.resume_epoch)
+            net.load_parameters(resume_params_file)
+            logging.info('Resume training from epoch {}'.format(self.resume_epoch))
+        else:
+            logging.info('Start training from scratch...')
 
         return net
 
     def get_dataloader(self):
         logging.info('getting data loader.')
-        config = self.config
-        num_devices = len(self.ctx)
-        train_split = config['train_split']
-        batch_size = config['batch_size']
-        input_shape = config['input_shape']
-        thread_batch_size = batch_size // num_devices
-        print ("train dataloder")
-        train_pipelines = [CenterNetTrainPipeline(split=train_split,
-                                                  batch_size=thread_batch_size,
-                                                  data_shape=input_shape[0],
-                                                  num_shards=num_devices,
-                                                  device_id=i,
-                                                  num_workers=16) for i in range(num_devices)]
-        epoch_size = train_pipelines[0].size()
-        num_classes = config['num_classes']
-        train_loader = CenterNetTrainLoader(train_pipelines, epoch_size, thread_batch_size, num_classes, input_shape)
+        num_classes = 80
+        train_loader = CenterNetTrainLoader(split=self.train_split,
+                                            batch_size=self.thread_batch_size,
+                                            num_classes=num_classes,
+                                            data_shape=self.input_size,
+                                            num_devices=self.num_devices)
 
         print ("val dataloder")
-        val_split = self.config['val_split']
-        val_pipelines = [ValPipeline(split=val_split, batch_size=thread_batch_size,
-                                     data_shape=input_shape[0], num_shards=num_devices,
-                                     device_id=i, num_workers=16) for i in range(num_devices)]
-        epoch_size = val_pipelines[0].size()
-        val_loader = ValLoader(val_pipelines, epoch_size, thread_batch_size, input_shape)
+        val_loader = None
         print ('load dataloder done')
 
         return train_loader, val_loader
     
-    def get_eval_metric(self):
-        config = self.config
-        log_file = '{}_{}_{}_{}x{}_eval'.format(config['model'], config['dataset'], config['network'],
-                                                config['input_shape'][0], config['input_shape'][1]) 
-        log_path = os.path.expanduser(os.path.join(config['save_prefix'], log_file))
+    def get_lr_scheduler(self, lr, num_example, batch_size, lr_schd='1x'):
+        # lr = 0.005 / 8 * len(self.ctx) * self.thread_batch_size
+        iters_per_epoch = num_example // batch_size
+        if lr_schd == '1x':
+            step_iter = (60000, 80000)
+            total_iter = 90000
+            epoch = int(np.ceil(total_iter/iters_per_epoch))
+        else:
+            raise NotImplementedError
+        logging.info('Total training epoch {}'.format(epoch))
+        lr_scheduler = LRSequential([
+            LRScheduler('linear', base_lr=0, target_lr=lr, niters=500),
+            LRScheduler('step', base_lr=self.lr, niters=total_iter, step_iter=step_iter)
+        ])
 
-        val_split = self.config['val_split']
-        
-        val_metric = COCODetectionMetric(dataset=val_split,
-                                         save_prefix=log_path,
-                                         use_time=False,
-                                         cleanup=True,
-                                         data_shape=config['input_shape'])
-        return val_metric
-    
+        return lr_scheduler, epoch
+
     def train(self):
-        config = self.config
-
-        batch_size = config['batch_size']
         
         self.net.collect_params().reset_ctx(self.ctx)
+        
         trainer = gluon.Trainer(
             params=self.net.collect_params(),
-            optimizer=config['optimizer'],
-            optimizer_params={'learning_rate': config['lr'],
-                              'wd': config['wd'],
-                              'momentum': config['momentum']},
-            update_on_kvstore=(False if config['amp'] else None)
+            optimizer='sgd',
+            optimizer_params={'lr_scheduler': self.lr_scheduler,
+                              'wd': self.wd,
+                              'momentum': 0.9},
+            update_on_kvstore=(False if self.use_amp else None)
         )
 
-        lr_decay = config.get('lr_decay', 0.1)
-        lr_steps = sorted([float(ls) for ls in config['lr_decay_epoch'].split(',') if ls.strip()])
-
-        hm_creteria = FocalLoss()
-        offset_creteria = gluon.loss.L1Loss()
-        wh_creteria = gluon.loss.L1Loss()
-        
-        hm_metric = mx.metric.Loss('FocalLoss')
-        offset_metric = mx.metric.Loss('Offset_L1')
-        wh_metric = mx.metric.Loss('WH_L1')
+        heatmap_loss = HeatmapFocalLoss(from_logits=True)
+        wh_loss = MaskedL1Loss(weight=0.1)
+        center_reg_loss = MaskedL1Loss(weight=1.0)
+        heatmap_loss_metric = mx.metric.Loss('HeatmapFocal')
+        wh_metric = mx.metric.Loss('WHL1')
+        center_reg_metric = mx.metric.Loss('CenterRegL1')
 
         logging.info('Start training from scratch...')
         
-        for epoch in range(config['epoch']):
-            while lr_steps and epoch > lr_steps[0]:
-                new_lr = trainer.learning_rate*lr_decay
-                lr_steps.pop(0)
-                trainer.set_learning_rate(new_lr)
-                logging.info("Epoch {} Set learning rate to {}".format(epoch, new_lr))
-            
-            hm_metric.reset()
-            offset_metric.reset()
+        for epoch in range(self.epoch):
+           
+            heatmap_loss_metric.reset()
             wh_metric.reset()
+            center_reg_metric.reset()
             
             tic = time.time()
             btic = time.time()
             self.net.collect_params().reset_ctx(self.ctx)
-            # self.net.hybridize(static_alloc=True, static_shape=True)
-            for i, (batch, _, _) in enumerate(self.train_data):
-                batch_data = [d.data[0] for d in batch]
-                batch_hm = [d.label[0] for d in batch]
-                batch_offset = [d.label[1] for d in batch]
-                batch_wh = [d.label[2] for d in batch]
-                
-                with autograd.record():
-                    hm_losses, offset_losses, wh_losses, sum_losses = [], [], [], []
-                    for data, hm, offset, wh in zip(batch_data, batch_hm, batch_offset, batch_wh):
-                        # print ('input data sum: {}'.format(nd.sum(data)))
-                        outputs = self.net(data)
-                        # hm_pred, offset_pred, wh_pred = outputs
-                        hm_pred = outputs[0]
-                        # print ('sum hm_pred: {}'.format(nd.sum(hm_pred)))
-                        
-                        # hm_loss = hm_creteria(hm_pred, hm)
-                        hm_loss = offset_creteria(hm_pred, hm)
-                        # offset_loss = offset_creteria(offset_pred, offset)
-                        # wh_loss = wh_creteria(wh_pred, wh)
-
-                        # sum_loss = hm_loss  #  + offset_loss + 0.1*wh_loss
-                        
-                        hm_losses.append(hm_loss)
-                        # offset_losses.append(offset_loss)
-                        # wh_losses.append(wh_loss)
-                        # sum_losses.append(sum_loss)
-
-                        autograd.backward(hm_loss)
-                    
-                    # for sum_loss in sum_losses:
-                    #     autograd.backward(sum_loss)
-                
-                # since we have already normalized the loss, we don't want to normalize
-                # by batch-size anymore
-                trainer.step(batch_size)
-
-                hm_metric.update(0, [l * batch_size for l in hm_losses])
-                # offset_metric.update(0, [l * batch_size for l in offset_losses])
-                # wh_metric.update(0, [l * batch_size for l in wh_losses])
-                if i > 0 and i % 50 == 0:
-                    name1, loss1 = hm_metric.get()
-                    # name2, loss2 = offset_metric.get()
-                    # name3, loss3 = wh_metric.get()
-                    # logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.3f}, {}={:.3f}, {}={:.3f}'.\
-                    #        format(epoch, i, batch_size/(time.time()-btic), name1, loss1, name2, loss2, name3, loss3))
-                    logging.info('Epoch {} Batch {} Speed: {:.3f} samples/s, {}={:.3f}'.\
-                           format(epoch, i, batch_size/(time.time()-btic), name1, loss1))
+            self.net.hybridize(static_alloc=True, static_shape=True)
             
+            for i, data_batch in enumerate(self.train_data):
+                print ('i: {}'.format(i))
+                
+                all_data, all_hm, all_wh_target, all_wh_mask, all_center_reg,\
+                    all_center_reg_mask, all_img_ids, origin_gtbox = data_batch
+
+                with autograd.record():
+                    sum_losses = []
+                    heatmap_losses = []
+                    wh_losses = []
+                    center_reg_losses = []
+                    wh_preds = []
+                    for data, heatmap_target, wh_target, wh_mask, center_reg_target, center_reg_mask in \
+                            zip(all_data, all_hm, all_wh_target, all_wh_mask, all_center_reg, all_center_reg_mask):
+                        outputs = self.net(data)
+                        heatmap_pred, wh_pred, center_reg_pred = outputs
+                        print ('hm_target: {}'.format(heatmap_target.shape))
+                        print ('hm_pred: {}'.format(heatmap_pred.shape))
+                        
+                        print ('wh_target: {}'.format(wh_target.shape))
+                        print ('wh_mask: {}'.format(wh_mask.shape))
+                        print ('wh_pred: {}'.format(wh_pred.shape))
+
+                        print ('center_reg_target: {}'.format(center_reg_target.shape))
+                        print ('center_reg_mask: {}'.format(center_reg_mask.shape))
+                        print ('center_reg_pred: {}'.format(center_reg_pred.shape))
+                        heatmap_losses.append(heatmap_loss(heatmap_pred, heatmap_target))
+        """
+                        wh_losses.append(wh_loss(wh_pred, wh_target, wh_mask))
+                        center_reg_losses.append(center_reg_loss(center_reg_pred, center_reg_target, center_reg_mask))
+                        curr_loss = heatmap_losses[-1]+ wh_losses[-1] + center_reg_losses[-1]
+                        sum_losses.append(curr_loss)
+                    autograd.backward(sum_losses)
+                trainer.step(len(sum_losses))  # step with # gpus
+                heatmap_loss_metric.update(0, heatmap_losses)
+                wh_metric.update(0, wh_losses)
+                center_reg_metric.update(0, center_reg_losses)
+                if i > 0 and (i + 1) % 50 == 0:
+                    name2, loss2 = wh_metric.get()
+                    name3, loss3 = center_reg_metric.get()
+                    name4, loss4 = heatmap_loss_metric.get()
+                    logging.info('[Epoch {}][Batch {}], Speed: {:.3f} samples/sec, LR={}, {}={:.3f}, {}={:.3f}, {}={:.3f}'.format(epoch, i, batch_size/(time.time()-btic), trainer.learning_rate, name2, loss2, name3, loss3, name4, loss4))
                 btic = time.time()
-            # map_name, mean_ap = self.validation()
-            # val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
-            # logging.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
-            self.save_params(epoch)
+
+            name2, loss2 = wh_metric.get()
+            name3, loss3 = center_reg_metric.get()
+            name4, loss4 = heatmap_loss_metric.get()
+            logging.info('[Epoch {}] Training cost: {:.3f}, {}={:.3f}, {}={:.3f}, {}={:.3f}'.format(
+                epoch, (time.time()-tic), name2, loss2, name3, loss3, name4, loss4))
+        """
+
 
     def validation(self):
         self.eval_metric.reset()

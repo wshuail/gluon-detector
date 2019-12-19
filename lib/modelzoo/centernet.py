@@ -1,5 +1,7 @@
 import os
 import sys
+from collections import OrderedDict
+from pathlib import Path
 sys.path.insert(0, os.path.expanduser('~/incubator-mxnet/python'))
 import mxnet as mx
 from mxnet import gluon
@@ -7,8 +9,9 @@ from mxnet.gluon import nn
 
 sys.path.insert(0, os.path.expanduser('~/gluon-cv'))
 from gluoncv.model_zoo import get_model
-
-from ..feature import centernet_extractor
+d = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(d))
+from lib.modelzoo.feature import centernet_extractor
 
 
 class CenterNet(nn.HybridBlock):
@@ -53,31 +56,39 @@ class CenterNet(nn.HybridBlock):
         
         return layers
 
-    def _build_heads(self, head, head_class):
+    def _build_heads(self, head_name, head_params):
+        bias = head_params.get('bias', 0)
+        head_class = head_params['num_output']
+        weight_initializer = mx.init.Normal(0.001) if bias == 0 else mx.init.Xavier()
         layers = nn.HybridSequential()
         layers.add(nn.Conv2D(channels=self.head_conv, kernel_size=3,
-                             padding=(1, 1), use_bias=True))
+                             padding=(1, 1), use_bias=True,
+                             weight_initializer=weight_initializer,
+                             bias_initializer='zeros'))
         layers.add(nn.Activation(activation='relu'))
         layers.add(nn.Conv2D(channels=head_class, kernel_size=(1, 1),
-                             strides=(1, 1), padding=(0, 0), use_bias=True))
-        if head == 'hm':
-            layers.add(nn.Activation(activation='sigmoid'))
+                             strides=(1, 1), padding=(0, 0), use_bias=True,
+                             weight_initializer=weight_initializer,
+                             bias_initializer=mx.init.Constant(bias)))
         return layers
 
     def hybrid_forward(self, F, x):
         x = self.feature(x)
         x = self.deconv_layers(x)
         outputs = [layer(x) for layer in self.head_layers]
+        outputs[0] = F.sigmoid(outputs[0])
+        outputs[0] = F.clip(outputs[0], 1e-4, 1 - 1e-4)
         
         return outputs
 
-
-"""
-if __name__ == '__main__':
-
+def centernet_resnet18_v1_coco():
     network = 'resnet18_v1'
     layers = ['stage4_activation1']
-    heads = {'hm': 80}
+    heads = OrderedDict([
+        ('heatmap', {'num_output': 80, 'bias': -2.19}),
+        ('wh', {'num_output': 2}),
+        ('reg', {'num_output': 2})
+        ])
     head_conv = 64
     net = CenterNet(network, layers, heads, head_conv)
 
@@ -85,12 +96,17 @@ if __name__ == '__main__':
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         net.initialize()
+    
+    return net
 
+
+if __name__ == '__main__':
+    net = centernet_resnet18_v1_coco()
     x = mx.nd.random.uniform(0, 1, (1, 3, 512, 512))
-    out = net(x)[0]
-    print (out.shape)
+    outs = net(x)
+    for out in outs:
+        print (out.shape)
 
-"""
 
 
 

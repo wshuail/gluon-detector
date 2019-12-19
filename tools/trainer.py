@@ -81,6 +81,34 @@ if __name__ == '__main__':
                                  gpu_batch_size, optimizer, lr, wd, resume_epoch,
                                  train_split, val_split, use_amp, gpus,
                                  save_frequent, save_prefix)
+
+    elif model == 'centernet':
+        backbone = config['backbone']
+        dataset = config['dataset']
+        train_split = config['train_split']
+        val_split = config['val_split']
+        input_size = config['input_size']
+        gpu_batch_size = config['gpu_batch_size']
+        optimizer = config['optimizer']
+        lr = config['lr']
+        wd = config['wd']
+        resume_epoch = config.get('resume_epoch', 0)
+        gpus = config['gpus']
+        use_amp = config.get('use_amp', False)
+        save_frequent = config['save_frequent']
+        save_prefix = config['save_prefix']
+
+        timestamp = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+        log_file_name = 'centernet_{}_{}_{}x{}_train_{}.log'.\
+            format(dataset, backbone, input_size, input_size, timestamp)
+        log_path = os.path.join(os.path.expanduser(save_prefix), log_file_name)
+        build_logger(log_path)
+        logging.info(config)
+
+        solver = CenterNetSolver(backbone, dataset, input_size,
+                                 gpu_batch_size, optimizer, lr, wd, resume_epoch,
+                                 train_split, val_split, use_amp, gpus,
+                                 save_frequent, save_prefix)
     else:
         raise NotImplementedError
 

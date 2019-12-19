@@ -1,34 +1,13 @@
 
 model: 'centernet'
-heads:
-    'hm': 80
-    #     'reg': 2
-    #     'wh': 2
-
-head_conv: 64
+backbone: 'resnet18_v1'
 
 dataset: 'coco'
 train_split: 'train2017'
 val_split: 'val2017'
 num_classes: 80
-
-dataset_opt:
-    down_ratio: 4
-    flip: 0.5
-    input_h: 512
-    input_w: 512
-    keep_res: False
-    mse_loss: False
-    color_aug: False
-    rand_crop: True
-    pad: 31
-    reg_offset: True
-    scale: 0.4
-    shift: 0.1
-    debug: False
-
-input_shape: [512, 512]
-batch_size: 64
+input_size: 512
+gpu_batch_size: 1
 
 gpus: 0,1,2,3
 lr: 0.003
@@ -38,9 +17,6 @@ gpus: 0,1,2,3
 epoch: 10
 optimizer: 'sgd'
 amp: False
-
-network: 'resnet18_v1'
-layers: ['stage4_activation1']
 
 save_prefix: '~/gluon_detector/output'
 save_frequent: 1

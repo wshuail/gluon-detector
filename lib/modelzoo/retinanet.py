@@ -77,8 +77,7 @@ class RetinaNet(nn.HybridBlock):
                           weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
                 nn.Activation(activation='relu'),
                 nn.Conv2D(channels=4*self.num_anchor, kernel_size=(3, 3), strides=(1, 1), padding=(1, 1),
-                          weight_initializer=mx.init.Normal(sigma=0.01),
-                          bias_initializer='zeros'),
+                          weight_initializer=mx.init.Normal(sigma=0.01), bias_initializer='zeros'),
             )
             
     def hybrid_forward(self, F, x):

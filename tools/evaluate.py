@@ -21,7 +21,7 @@ from lib.metrics.coco_detection import RetinaNetCOCODetectionMetric
 class Evaluator(object):
     def __init__(self, params_file, split='val2017', max_size=1024, resize_shorter=640,
                  gpus='0,1,2,3', thread_batch_size=2, save_prefix='~/gluon_detector/output',
-                 nms_thresh=0.45, nms_topk=400, post_nms=100, **kwargs):
+                 nms_thresh=0.45, nms_topk=1000, post_nms=100, **kwargs):
         self.nms_thresh = nms_thresh
         self.nms_topk = nms_topk
         self.post_nms = post_nms
@@ -96,7 +96,7 @@ class Evaluator(object):
 
 
 if __name__ == '__main__':
-    params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_1024x640-9999.params'
+    params_file = '/home/wangshuailong/gluon_detector/output/retinanet_coco_resnet50_v1_1024x640-0013.params'
     evaluator = Evaluator(params_file, gpus='0')
     evaluator.validation()
 

@@ -195,6 +195,16 @@ class TrainPipeline(Pipeline):
         self.input_labels_op = ops.ExternalSource()
         self.decode = ops.ImageDecoder(device = "mixed", output_type = types.RGB)
         
+        self.crop = dali.ops.RandomBBoxCrop(
+            device="cpu",
+            aspect_ratio=[0.5, 2.0],
+            thresholds=[0, 0.1, 0.3, 0.5, 0.7, 0.9],
+            scaling=[0.3, 1.0],
+            ltrb=True,
+            allow_no_crop=True,
+            num_attempts=1)
+        self.slice = dali.ops.Slice(device="gpu")
+        
         # Augumentation techniques
         if fix_shape:
             data_shape = 512
@@ -248,14 +258,14 @@ class TrainPipeline(Pipeline):
         self.labels = self.input_labels_op()
         images = self.decode(self.images)                                                   
 
+        crop_begin, crop_size, bboxes, labels = self.crop(self.bboxes, self.labels)
+        images = self.slice(images, crop_begin, crop_size)
+
         images = self.flip(images, horizontal=coin_rnd)
-        bboxes = self.bbflip(self.bboxes, horizontal=coin_rnd)
+        bboxes = self.bbflip(bboxes, horizontal=coin_rnd)
         images = self.resize(images)
-        
-        """
-        images = self.normalize(images)
-        """
-        labels = self.cast(self.labels)
+        # images = self.normalize(images)
+        labels = self.cast(labels)
 
         return images, bboxes.gpu(), labels.gpu(), self.image_ids.gpu()
 
